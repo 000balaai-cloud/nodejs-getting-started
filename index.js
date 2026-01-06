@@ -1,14 +1,17 @@
 const axios = require("axios");
 
-const SCRIPT_URL = "PASTE_YOUR_NEW_GOOGLE_SCRIPT_URL_HERE";
 const UPI_ID = "8121893882-2@ybl";
-
 let sessions = {};
 
 module.exports = async (req, res) => {
-  const msg = req.body.data?.body?.trim();
-  const from = req.body.data?.from;
-  const name = req.body.data?.notifyName || "";
+  const data = req.body.data || {};
+  const from = data.from;
+  const name = data.notifyName || "";
+  const buttonId = data.button?.payload; // button reply
+  const text = (data.body || "").trim();
+  const type = data.type;
+
+  if (!from) return res.sendStatus(200);
 
   if (!sessions[from]) {
     sessions[from] = { step: "MENU", phone: from, name };
@@ -16,226 +19,205 @@ module.exports = async (req, res) => {
 
   const s = sessions[from];
 
-  // BACK OPTION
-  if (msg === "0") {
+  // BACK
+  if (buttonId === "BACK") {
     s.step = "MENU";
   }
-
-  let reply = "";
 
   switch (s.step) {
 
     // ---------------- MENU ----------------
     case "MENU":
-      reply =
-`🥛 *Welcome to Bala Milk Dairy*
-
-Please choose an option:
-1️⃣ Buffalo Milk – ₹100/L
-2️⃣ Cow Milk – ₹120/L
-3️⃣ Paneer – ₹600/Kg
-4️⃣ Ghee – ₹1000/Kg
-5️⃣ Daily Milk Subscription
-6️⃣ Enquiry Only
-
-Reply with option number.`;
+      await sendButtons(from,
+        "🥛 *Welcome to Bala Milk Dairy*\n\nPlease choose an option:",
+        [
+          { id: "BUFFALO", title: "Buffalo Milk" },
+          { id: "COW", title: "Cow Milk" },
+          { id: "PANEER", title: "Paneer" },
+          { id: "GHEE", title: "Ghee" },
+          { id: "ENQUIRY", title: "Enquiry Only" }
+        ]
+      );
       s.step = "PRODUCT";
       break;
 
     // ---------------- PRODUCT ----------------
     case "PRODUCT":
-      if (msg === "6") {
+      if (buttonId === "ENQUIRY") {
         s.type = "Enquiry";
         s.step = "ENQUIRY";
-        reply = "✍️ Please type your enquiry.\n\n0️⃣ Back";
+        await sendText(from, "✍️ Please type your enquiry.");
         break;
       }
 
       const products = {
-        "1": { name: "Buffalo Milk", price: 100 },
-        "2": { name: "Cow Milk", price: 120 },
-        "3": { name: "Paneer", price: 600 },
-        "4": { name: "Ghee", price: 1000 }
+        BUFFALO: { name: "Buffalo Milk", price: 100 },
+        COW: { name: "Cow Milk", price: 120 },
+        PANEER: { name: "Paneer", price: 600 },
+        GHEE: { name: "Ghee", price: 1000 }
       };
 
-      if (!products[msg]) {
-        reply = "❌ Invalid option.\n0️⃣ Back";
-        break;
-      }
+      if (!products[buttonId]) break;
 
-      s.product = products[msg];
-      reply =
-`🧾 *${s.product.name}*
+      s.product = products[buttonId];
 
-Choose quantity:
-1️⃣ 500ml – ₹${s.product.price / 2}
-2️⃣ 1 L – ₹${s.product.price}
-3️⃣ 2 L – ₹${s.product.price * 2}
-
-0️⃣ Back`;
+      await sendButtons(from,
+        `🧾 *${s.product.name}*\nChoose quantity:`,
+        [
+          { id: "Q_500", title: `500ml – ₹${s.product.price / 2}` },
+          { id: "Q_1L", title: `1 L – ₹${s.product.price}` },
+          { id: "Q_2L", title: `2 L – ₹${s.product.price * 2}` },
+          { id: "BACK", title: "⬅ Back" }
+        ]
+      );
       s.step = "QUANTITY";
       break;
 
     // ---------------- QUANTITY ----------------
     case "QUANTITY":
       const qtyMap = {
-        "1": { q: "500ml", m: 0.5 },
-        "2": { q: "1L", m: 1 },
-        "3": { q: "2L", m: 2 }
+        Q_500: { q: "500ml", m: 0.5 },
+        Q_1L: { q: "1L", m: 1 },
+        Q_2L: { q: "2L", m: 2 }
       };
 
-      if (!qtyMap[msg]) {
-        reply = "❌ Choose valid quantity.\n0️⃣ Back";
-        break;
-      }
+      if (!qtyMap[buttonId]) break;
 
-      s.quantity = qtyMap[msg].q;
-      s.price = s.product.price * qtyMap[msg].m;
+      s.quantity = qtyMap[buttonId].q;
+      s.price = s.product.price * qtyMap[buttonId].m;
 
-      reply =
-`📍 Delivery Address:
-1️⃣ Send live location
-2️⃣ Type address manually
-
-0️⃣ Back`;
+      await sendButtons(from,
+        "📍 Delivery Address:",
+        [
+          { id: "LOC", title: "Send Live Location" },
+          { id: "ADDR", title: "Type Address" },
+          { id: "BACK", title: "⬅ Back" }
+        ]
+      );
       s.step = "ADDRESS";
       break;
 
     // ---------------- ADDRESS ----------------
     case "ADDRESS":
-      if (msg === "1") {
-        reply = "📌 Please share live location now.";
+      if (buttonId === "LOC") {
         s.step = "LOCATION";
-      } else if (msg === "2") {
-        reply = "✍️ Please type your full address.\n\n0️⃣ Back";
+        await sendText(from, "📌 Please share live location.");
+      } 
+      else if (buttonId === "ADDR") {
         s.step = "ADDRESS_TEXT";
-      } else {
-        reply = "❌ Invalid option.\n0️⃣ Back";
+        await sendText(from, "✍️ Please type your full address.");
       }
       break;
 
-    case "ADDRESS_TEXT":
-      s.address = msg;
+    case "LOCATION":
+      if (type !== "location") break;
+      s.address = "Live Location";
       s.step = "DELIVERY";
-      reply =
-`⏰ Delivery Slot:
-1️⃣ Morning
-2️⃣ Evening
-
-0️⃣ Back`;
+      await sendButtons(from,
+        "⏰ Delivery Slot:",
+        [
+          { id: "MORNING", title: "Morning" },
+          { id: "EVENING", title: "Evening" }
+        ]
+      );
       break;
 
-    case "LOCATION":
-      s.address = "Live Location Shared";
+    case "ADDRESS_TEXT":
+      s.address = text;
       s.step = "DELIVERY";
-      reply =
-`⏰ Delivery Slot:
-1️⃣ Morning
-2️⃣ Evening
-
-0️⃣ Back`;
+      await sendButtons(from,
+        "⏰ Delivery Slot:",
+        [
+          { id: "MORNING", title: "Morning" },
+          { id: "EVENING", title: "Evening" }
+        ]
+      );
       break;
 
     // ---------------- DELIVERY ----------------
     case "DELIVERY":
-      if (msg === "1") s.delivery = "Morning";
-      else if (msg === "2") s.delivery = "Evening";
-      else {
-        reply = "❌ Invalid option.\n0️⃣ Back";
-        break;
-      }
-
-      reply =
-`🕒 Enter delivery time (example: 6:30 AM)\n\n0️⃣ Back`;
+      s.delivery = buttonId;
       s.step = "TIME";
+      await sendText(from, "🕒 Enter delivery time (example: 6:30 AM)");
       break;
 
     case "TIME":
-      s.deliveryTime = `${s.delivery} ${msg}`;
-      reply =
-`💰 Payment Method:
-1️⃣ UPI
-2️⃣ Cash on Delivery
-
-0️⃣ Back`;
+      s.deliveryTime = text;
       s.step = "PAYMENT";
+      await sendButtons(from,
+        "💰 Payment Method:",
+        [
+          { id: "UPI", title: "UPI" },
+          { id: "COD", title: "Cash on Delivery" }
+        ]
+      );
       break;
 
     // ---------------- PAYMENT ----------------
     case "PAYMENT":
-      if (msg === "1") {
-        s.payment = "UPI";
-        reply =
-`💳 Pay using UPI:
-👉 ${UPI_ID}
-
-📸 After payment, send screenshot.
-
-0️⃣ Back`;
-        s.step = "SCREENSHOT";
-      } else if (msg === "2") {
-        s.payment = "Cash on Delivery";
-        await saveToSheet(s, "COD");
-        reply =
+      if (buttonId === "COD") {
+        await sendText(from,
 `✅ Order Confirmed!
 
-🙏 Thank you for ordering from *Bala Milk Dairy* 🥛`;
+🙏 Thank you for ordering from *Bala Milk Dairy* 🥛`);
         delete sessions[from];
-      } else {
-        reply = "❌ Invalid option.\n0️⃣ Back";
+      }
+
+      if (buttonId === "UPI") {
+        s.step = "SCREENSHOT";
+        await sendText(from,
+`💳 Pay via UPI:
+👉 ${UPI_ID}
+
+📸 Send payment screenshot`);
       }
       break;
 
     // ---------------- SCREENSHOT ----------------
     case "SCREENSHOT":
-      await saveToSheet(s, "UPI Screenshot");
-      reply =
+      if (type !== "image") break;
+
+      await sendText(from,
 `✅ Payment received!
 
-🙏 Thank you for ordering from *Bala Milk Dairy* 🥛`;
+🙏 Thank you for ordering from *Bala Milk Dairy* 🥛`);
       delete sessions[from];
       break;
 
     // ---------------- ENQUIRY ----------------
     case "ENQUIRY":
-      await saveToSheet({
-        phone: s.phone,
-        name: s.name,
-        type: "Enquiry",
-        product: msg
-      }, "Enquiry");
-
-      reply =
+      await sendText(from,
 `🙏 Thank you for contacting *Bala Milk Dairy*.
-We will get back to you soon.`;
+We will get back to you soon.`);
       delete sessions[from];
       break;
   }
 
-  await sendMessage(from, reply);
   res.sendStatus(200);
 };
 
-// -------- SEND MESSAGE ----------
-async function sendMessage(to, body) {
+// ---------------- SEND TEXT ----------------
+async function sendText(to, body) {
   await axios.post(process.env.WHATSAPP_API_URL, {
     to,
     body
   });
 }
 
-// -------- SAVE TO GOOGLE SHEET ----------
-async function saveToSheet(s, method) {
-  await axios.post(SCRIPT_URL, {
-    OrderId: "ORD-" + Date.now(),
-    Phone: s.phone,
-    ContactName: s.name,
-    Type: s.type || "Payment",
-    Product: s.product?.name || "",
-    Quantity: s.quantity || "",
-    Price: s.price || "",
-    Address: s.address || "",
-    Delivery: s.deliveryTime || "",
-    Payment: method
+// ---------------- SEND BUTTONS ----------------
+async function sendButtons(to, text, buttons) {
+  await axios.post(process.env.WHATSAPP_API_URL, {
+    to,
+    type: "interactive",
+    interactive: {
+      type: "button",
+      body: { text },
+      action: {
+        buttons: buttons.map(b => ({
+          type: "reply",
+          reply: { id: b.id, title: b.title }
+        }))
+      }
+    }
   });
 }

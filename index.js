@@ -4,261 +4,168 @@ const axios = require("axios");
 const app = express();
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
-// ===== CONFIG =====
-const WHATSAPP_API_URL = process.env.WHATSAPP_API_URL;
-const UPI_ID = "8121893882-2@ybl";
+// Temporary in-memory order store
+const userOrders = {};
 
-// ===== SESSION STORE =====
-const sessions = {};
+/* =========================
+   HEALTH CHECK
+========================= */
+app.get("/", (req, res) => {
+  res.send("WhatsApp Bot Running");
+});
 
-// ===== WEBHOOK =====
+/* =========================
+   WEBHOOK VERIFY
+========================= */
+app.get("/webhook", (req, res) => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+
+  if (mode === "subscribe" && token === process.env.VERIFY_TOKEN) {
+    return res.status(200).send(challenge);
+  }
+  return res.sendStatus(403);
+});
+
+/* =========================
+   WEBHOOK RECEIVE
+========================= */
 app.post("/webhook", async (req, res) => {
+  console.log("📩 Incoming:", JSON.stringify(req.body, null, 2));
+
   try {
-    const data = req.body.data || {};
-    const text = (data.body || "").trim();
-    const from = data.from;
-    const name = data.notifyName || "";
+    const message =
+      req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
 
-    if (!from) return res.sendStatus(200);
+    if (!message) return res.sendStatus(200);
 
-    if (!sessions[from]) {
-      sessions[from] = {
-        step: "MENU",
-        phone: from,
-        name
-      };
+    const from = message.from;
+
+    /* ========= TEXT MESSAGE ========= */
+    if (message.text) {
+      const text = message.text.body.toLowerCase();
+
+      if (text === "hi") {
+        userOrders[from] = {};
+        await sendMainMenu(from);
+      }
     }
 
-    const s = sessions[from];
+    /* ========= BUTTON REPLY ========= */
+    if (message.button) {
+      const btn = message.button.payload;
 
-    // BACK OPTION
-    if (text === "0") {
-      s.step = "MENU";
+      // MAIN MENU
+      if (btn === "ORDER") {
+        await sendQuantityMenu(from);
+      }
+
+      // QUANTITY
+      if (btn.startsWith("QTY_")) {
+        const qty = parseInt(btn.split("_")[1]);
+        const price = qty * 500; // price per kg
+
+        userOrders[from] = { qty, price };
+
+        await sendConfirmation(from, qty, price);
+      }
+
+      // BACK
+      if (btn === "BACK_MENU") {
+        await sendMainMenu(from);
+      }
+
+      // CONFIRM
+      if (btn === "CONFIRM_ORDER") {
+        await sendText(
+          from,
+          `✅ Order confirmed!\n\nQuantity: ${userOrders[from].qty} Kg\nTotal: ₹${userOrders[from].price}\n\nOur team will contact you shortly.`
+        );
+      }
     }
 
-    let reply = "";
-
-    switch (s.step) {
-
-      // ========= MENU =========
-      case "MENU":
-        reply =
-`🥛 *Welcome to Bala Milk Dairy*
-
-Please choose an option:
-1️⃣ Buffalo Milk – ₹100/L
-2️⃣ Cow Milk – ₹120/L
-3️⃣ Paneer – ₹600/Kg
-4️⃣ Ghee – ₹1000/Kg
-5️⃣ Daily Milk Subscription
-6️⃣ Enquiry Only
-
-Reply with option number.`;
-        s.step = "PRODUCT";
-        break;
-
-      // ========= PRODUCT =========
-      case "PRODUCT":
-        if (text === "6") {
-          s.type = "Enquiry";
-          s.step = "ENQUIRY";
-          reply = "✍️ Please type your enquiry.\n\n0️⃣ Back";
-          break;
-        }
-
-        const products = {
-          "1": { name: "Buffalo Milk", price: 100 },
-          "2": { name: "Cow Milk", price: 120 },
-          "3": { name: "Paneer", price: 600 },
-          "4": { name: "Ghee", price: 1000 }
-        };
-
-        if (!products[text]) {
-          reply = "❌ Invalid option\n\n0️⃣ Back";
-          break;
-        }
-
-        s.product = products[text];
-
-        reply =
-`🧾 *${s.product.name}*
-
-Price: ₹${s.product.price}
-
-Choose quantity:
-1️⃣ 500ml – ₹${s.product.price / 2}
-2️⃣ 1 L – ₹${s.product.price}
-3️⃣ 2 L – ₹${s.product.price * 2}
-
-0️⃣ Back`;
-
-        s.step = "QUANTITY";
-        break;
-
-      // ========= QUANTITY =========
-      case "QUANTITY":
-        const qtyMap = {
-          "1": { label: "500ml", multiplier: 0.5 },
-          "2": { label: "1L", multiplier: 1 },
-          "3": { label: "2L", multiplier: 2 }
-        };
-
-        if (!qtyMap[text]) {
-          reply = "❌ Invalid quantity\n\n0️⃣ Back";
-          break;
-        }
-
-        s.quantity = qtyMap[text].label;
-        s.price = s.product.price * qtyMap[text].multiplier;
-
-        reply =
-`📍 Delivery Address:
-1️⃣ Send live location
-2️⃣ Type address manually
-
-0️⃣ Back`;
-
-        s.step = "ADDRESS";
-        break;
-
-      // ========= ADDRESS =========
-      case "ADDRESS":
-        if (text === "1") {
-          reply = "📌 Please share live location now.";
-          s.step = "LOCATION";
-        } else if (text === "2") {
-          reply = "✍️ Please type your full address.\n\n0️⃣ Back";
-          s.step = "ADDRESS_TEXT";
-        } else {
-          reply = "❌ Invalid option\n\n0️⃣ Back";
-        }
-        break;
-
-      case "LOCATION":
-        s.address = "Live Location Shared";
-        reply =
-`⏰ Delivery Slot:
-1️⃣ Morning
-2️⃣ Evening
-
-0️⃣ Back`;
-        s.step = "DELIVERY";
-        break;
-
-      case "ADDRESS_TEXT":
-        s.address = text;
-        reply =
-`⏰ Delivery Slot:
-1️⃣ Morning
-2️⃣ Evening
-
-0️⃣ Back`;
-        s.step = "DELIVERY";
-        break;
-
-      // ========= DELIVERY =========
-      case "DELIVERY":
-        if (text === "1") s.delivery = "Morning";
-        else if (text === "2") s.delivery = "Evening";
-        else {
-          reply = "❌ Invalid option\n\n0️⃣ Back";
-          break;
-        }
-
-        reply =
-`🕒 Enter delivery time
-Example: 6:30 AM
-
-0️⃣ Back`;
-        s.step = "TIME";
-        break;
-
-      case "TIME":
-        s.deliveryTime = `${s.delivery} ${text}`;
-
-        reply =
-`💰 Payment Method:
-1️⃣ UPI
-2️⃣ Cash on Delivery
-
-0️⃣ Back`;
-        s.step = "PAYMENT";
-        break;
-
-      // ========= PAYMENT =========
-      case "PAYMENT":
-        if (text === "1") {
-          reply =
-`💳 *UPI Payment*
-
-Pay to:
-👉 ${UPI_ID}
-
-📸 After payment, send screenshot.
-
-0️⃣ Back`;
-          s.step = "SCREENSHOT";
-        } else if (text === "2") {
-          reply =
-`✅ *Order Confirmed!*
-
-Product: ${s.product.name}
-Quantity: ${s.quantity}
-Price: ₹${s.price}
-
-🙏 Thank you for ordering from *Bala Milk Dairy* 🥛`;
-          delete sessions[from];
-        } else {
-          reply = "❌ Invalid option\n\n0️⃣ Back";
-        }
-        break;
-
-      // ========= SCREENSHOT =========
-      case "SCREENSHOT":
-        reply =
-`✅ *Payment received!*
-
-Product: ${s.product.name}
-Quantity: ${s.quantity}
-Price: ₹${s.price}
-
-🙏 Thank you for ordering from *Bala Milk Dairy* 🥛`;
-        delete sessions[from];
-        break;
-
-      // ========= ENQUIRY =========
-      case "ENQUIRY":
-        reply =
-`🙏 Thank you for contacting *Bala Milk Dairy*.
-Our team will get back to you soon.`;
-        delete sessions[from];
-        break;
-    }
-
-    await sendMessage(from, reply);
     res.sendStatus(200);
-
   } catch (err) {
-    console.error(err);
+    console.error("Webhook Error:", err.message);
     res.sendStatus(200);
   }
 });
 
-// ===== SEND MESSAGE =====
-async function sendMessage(to, body) {
-  await axios.post(WHATSAPP_API_URL, {
+/* =========================
+   SEND FUNCTIONS
+========================= */
+
+async function sendMainMenu(to) {
+  await axios.post(process.env.WHATSAPP_API_URL, {
+    messaging_product: "whatsapp",
     to,
-    body
+    type: "interactive",
+    interactive: {
+      type: "button",
+      body: { text: "Welcome 👋\nPlease choose an option:" },
+      action: {
+        buttons: [
+          { type: "reply", reply: { id: "ORDER", title: "🛒 Place Order" } }
+        ]
+      }
+    }
   });
 }
 
-// ===== SERVER =====
-app.get("/", (req, res) => {
-  res.send("Bala Milk Dairy Bot is running");
-});
+async function sendQuantityMenu(to) {
+  await axios.post(process.env.WHATSAPP_API_URL, {
+    messaging_product: "whatsapp",
+    to,
+    type: "interactive",
+    interactive: {
+      type: "button",
+      body: { text: "Select quantity (₹500 per Kg):" },
+      action: {
+        buttons: [
+          { type: "reply", reply: { id: "QTY_1", title: "1 Kg" } },
+          { type: "reply", reply: { id: "QTY_2", title: "2 Kg" } },
+          { type: "reply", reply: { id: "BACK_MENU", title: "⬅️ Back" } }
+        ]
+      }
+    }
+  });
+}
 
+async function sendConfirmation(to, qty, price) {
+  await axios.post(process.env.WHATSAPP_API_URL, {
+    messaging_product: "whatsapp",
+    to,
+    type: "interactive",
+    interactive: {
+      type: "button",
+      body: {
+        text: `You selected:\n\nQuantity: ${qty} Kg\nTotal Price: ₹${price}\n\nConfirm order?`
+      },
+      action: {
+        buttons: [
+          { type: "reply", reply: { id: "CONFIRM_ORDER", title: "✅ Confirm" } },
+          { type: "reply", reply: { id: "BACK_MENU", title: "⬅️ Back" } }
+        ]
+      }
+    }
+  });
+}
+
+async function sendText(to, text) {
+  await axios.post(process.env.WHATSAPP_API_URL, {
+    messaging_product: "whatsapp",
+    to,
+    type: "text",
+    text: { body: text }
+  });
+}
+
+/* =========================
+   START SERVER
+========================= */
 app.listen(PORT, () => {
-  console.log("Server running on port", PORT);
+  console.log(`Server running on port ${PORT}`);
 });

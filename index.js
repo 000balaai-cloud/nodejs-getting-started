@@ -6,18 +6,23 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 10000;
 
-// Temporary in-memory order store
-const userOrders = {};
-
 /* =========================
-   HEALTH CHECK
+   SESSION STORAGE
 ========================= */
-app.get("/", (req, res) => {
-  res.send("WhatsApp Bot Running");
-});
+let sessions = {};
 
 /* =========================
-   WEBHOOK VERIFY
+   AXIOS CONFIG (VERY IMPORTANT)
+========================= */
+const axiosConfig = {
+  headers: {
+    "Content-Type": "application/json",
+    "Authorization": `Bearer ${process.env.WHATSAPP_TOKEN}`
+  }
+};
+
+/* =========================
+   VERIFY WEBHOOK (META)
 ========================= */
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
@@ -31,141 +36,218 @@ app.get("/webhook", (req, res) => {
 });
 
 /* =========================
-   WEBHOOK RECEIVE
+   RECEIVE MESSAGES
 ========================= */
 app.post("/webhook", async (req, res) => {
-  console.log("📩 Incoming:", JSON.stringify(req.body, null, 2));
-
   try {
-    const message =
-      req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    const entry = req.body.entry?.[0];
+    const change = entry?.changes?.[0];
+    const value = change?.value;
+    const message = value?.messages?.[0];
 
-    if (!message) return res.sendStatus(200);
-
-    const from = message.from;
-
-    /* ========= TEXT MESSAGE ========= */
-    if (message.text) {
-      const text = message.text.body.toLowerCase();
-
-      if (text === "hi") {
-        userOrders[from] = {};
-        await sendMainMenu(from);
-      }
+    if (!message) {
+      return res.sendStatus(200);
     }
 
-    /* ========= BUTTON REPLY ========= */
-    if (message.button) {
-      const btn = message.button.payload;
+    const from = message.from;
+    const text =
+      message.text?.body ||
+      message.interactive?.button_reply?.id ||
+      "";
 
-      // MAIN MENU
-      if (btn === "ORDER") {
-        await sendQuantityMenu(from);
-      }
+    console.log("📩 Incoming:", text);
 
-      // QUANTITY
-      if (btn.startsWith("QTY_")) {
-        const qty = parseInt(btn.split("_")[1]);
-        const price = qty * 500; // price per kg
+    if (!sessions[from]) {
+      sessions[from] = { step: "MENU" };
+      await sendMainMenu(from);
+      return res.sendStatus(200);
+    }
 
-        userOrders[from] = { qty, price };
+    const s = sessions[from];
 
-        await sendConfirmation(from, qty, price);
-      }
+    /* =========================
+       BACK BUTTON
+    ========================= */
+    if (text === "BACK") {
+      s.step = "MENU";
+      await sendMainMenu(from);
+      return res.sendStatus(200);
+    }
 
-      // BACK
-      if (btn === "BACK_MENU") {
-        await sendMainMenu(from);
-      }
+    /* =========================
+       FLOW LOGIC
+    ========================= */
+    switch (s.step) {
+      case "MENU":
+        if (text === "ORDER") {
+          s.step = "PRODUCT";
+          await sendProductMenu(from);
+        }
+        break;
 
-      // CONFIRM
-      if (btn === "CONFIRM_ORDER") {
+      case "PRODUCT":
+        s.product = text;
+        s.step = "QTY";
+        await sendQuantityMenu(from, text);
+        break;
+
+      case "QTY":
+        s.quantity = text;
+        s.step = "CONFIRM";
+        await sendConfirmation(from, s);
+        break;
+
+      case "CONFIRM":
         await sendText(
           from,
-          `✅ Order confirmed!\n\nQuantity: ${userOrders[from].qty} Kg\nTotal: ₹${userOrders[from].price}\n\nOur team will contact you shortly.`
+          "✅ *Thank you for ordering from Bala Milk Dairy!* 🥛\n\nOur team will contact you shortly."
         );
-      }
+        delete sessions[from];
+        break;
     }
 
     res.sendStatus(200);
   } catch (err) {
-    console.error("Webhook Error:", err.message);
+    console.error("❌ Webhook Error:", err.response?.data || err.message);
     res.sendStatus(200);
   }
 });
 
 /* =========================
-   SEND FUNCTIONS
+   SEND MAIN MENU
 ========================= */
-
 async function sendMainMenu(to) {
-  await axios.post(process.env.WHATSAPP_API_URL, {
-    messaging_product: "whatsapp",
-    to,
-    type: "interactive",
-    interactive: {
-      type: "button",
-      body: { text: "Welcome 👋\nPlease choose an option:" },
-      action: {
-        buttons: [
-          { type: "reply", reply: { id: "ORDER", title: "🛒 Place Order" } }
-        ]
+  await axios.post(
+    process.env.WHATSAPP_API_URL,
+    {
+      messaging_product: "whatsapp",
+      to,
+      type: "interactive",
+      interactive: {
+        type: "button",
+        body: {
+          text: "🥛 *Welcome to Bala Milk Dairy*\n\nPlease choose an option:"
+        },
+        action: {
+          buttons: [
+            {
+              type: "reply",
+              reply: { id: "ORDER", title: "🛒 Place Order" }
+            }
+          ]
+        }
       }
-    }
-  });
+    },
+    axiosConfig
+  );
 }
 
-async function sendQuantityMenu(to) {
-  await axios.post(process.env.WHATSAPP_API_URL, {
-    messaging_product: "whatsapp",
-    to,
-    type: "interactive",
-    interactive: {
-      type: "button",
-      body: { text: "Select quantity (₹500 per Kg):" },
-      action: {
-        buttons: [
-          { type: "reply", reply: { id: "QTY_1", title: "1 Kg" } },
-          { type: "reply", reply: { id: "QTY_2", title: "2 Kg" } },
-          { type: "reply", reply: { id: "BACK_MENU", title: "⬅️ Back" } }
-        ]
+/* =========================
+   PRODUCT MENU
+========================= */
+async function sendProductMenu(to) {
+  await axios.post(
+    process.env.WHATSAPP_API_URL,
+    {
+      messaging_product: "whatsapp",
+      to,
+      type: "interactive",
+      interactive: {
+        type: "button",
+        body: {
+          text: "🧾 *Select Product*"
+        },
+        action: {
+          buttons: [
+            { type: "reply", reply: { id: "Buffalo Milk ₹100/L", title: "Buffalo Milk" } },
+            { type: "reply", reply: { id: "Cow Milk ₹120/L", title: "Cow Milk" } },
+            { type: "reply", reply: { id: "BACK", title: "⬅️ Back" } }
+          ]
+        }
       }
-    }
-  });
+    },
+    axiosConfig
+  );
 }
 
-async function sendConfirmation(to, qty, price) {
-  await axios.post(process.env.WHATSAPP_API_URL, {
-    messaging_product: "whatsapp",
-    to,
-    type: "interactive",
-    interactive: {
-      type: "button",
-      body: {
-        text: `You selected:\n\nQuantity: ${qty} Kg\nTotal Price: ₹${price}\n\nConfirm order?`
-      },
-      action: {
-        buttons: [
-          { type: "reply", reply: { id: "CONFIRM_ORDER", title: "✅ Confirm" } },
-          { type: "reply", reply: { id: "BACK_MENU", title: "⬅️ Back" } }
-        ]
+/* =========================
+   QUANTITY MENU
+========================= */
+async function sendQuantityMenu(to, product) {
+  await axios.post(
+    process.env.WHATSAPP_API_URL,
+    {
+      messaging_product: "whatsapp",
+      to,
+      type: "interactive",
+      interactive: {
+        type: "button",
+        body: {
+          text: `📦 *${product}*\n\nChoose quantity:`
+        },
+        action: {
+          buttons: [
+            { type: "reply", reply: { id: "1L", title: "1 Litre" } },
+            { type: "reply", reply: { id: "2L", title: "2 Litres" } },
+            { type: "reply", reply: { id: "BACK", title: "⬅️ Back" } }
+          ]
+        }
       }
-    }
-  });
+    },
+    axiosConfig
+  );
 }
 
+/* =========================
+   CONFIRMATION
+========================= */
+async function sendConfirmation(to, s) {
+  await axios.post(
+    process.env.WHATSAPP_API_URL,
+    {
+      messaging_product: "whatsapp",
+      to,
+      type: "interactive",
+      interactive: {
+        type: "button",
+        body: {
+          text:
+            `🧾 *Order Summary*\n\n` +
+            `Product: ${s.product}\n` +
+            `Quantity: ${s.quantity}\n\n` +
+            `Confirm order?`
+        },
+        action: {
+          buttons: [
+            { type: "reply", reply: { id: "CONFIRM", title: "✅ Confirm" } },
+            { type: "reply", reply: { id: "BACK", title: "⬅️ Back" } }
+          ]
+        }
+      }
+    },
+    axiosConfig
+  );
+}
+
+/* =========================
+   SIMPLE TEXT MESSAGE
+========================= */
 async function sendText(to, text) {
-  await axios.post(process.env.WHATSAPP_API_URL, {
-    messaging_product: "whatsapp",
-    to,
-    type: "text",
-    text: { body: text }
-  });
+  await axios.post(
+    process.env.WHATSAPP_API_URL,
+    {
+      messaging_product: "whatsapp",
+      to,
+      type: "text",
+      text: { body: text }
+    },
+    axiosConfig
+  );
 }
 
 /* =========================
    START SERVER
 ========================= */
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log("🚀 Server running on port", PORT);
 });

@@ -1,5 +1,6 @@
 const express = require("express");
 const axios = require("axios");
+console.log("TOKEN LENGTH:", process.env.WHATSAPP_TOKEN?.length);
 
 const app = express();
 app.use(express.json());

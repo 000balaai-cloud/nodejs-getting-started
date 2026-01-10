@@ -29,16 +29,12 @@ async function send(payload) {
 }
 
 const sendText = (to, body) =>
-  send({
-    messaging_product: "whatsapp",
-    to,
-    text: { body },
-  });
+  send({ messaging_product: "whatsapp", to, text: { body } });
 
 /* ================= MENUS ================= */
 
 async function mainMenu(to) {
-  sessions[to] = { step: "MENU" };
+  sessions[to] = { step: "MENU", completed: false };
 
   await send({
     messaging_product: "whatsapp",
@@ -67,26 +63,18 @@ async function mainMenu(to) {
 }
 
 async function quantityMenu(to, product) {
-  sessions[to].step = "QTY";
-  sessions[to].product = product;
+  const s = sessions[to];
+  s.step = "QTY";
+  s.product = product;
 
   const map = {
     BUFFALO: [
       { id: "500ml|50", title: "500 ml", description: "₹50" },
       { id: "1L|100", title: "1 Liter", description: "₹100" },
-      { id: "2L|200", title: "2 Liter", description: "₹200" },
     ],
     COW: [
       { id: "500ml|60", title: "500 ml", description: "₹60" },
       { id: "1L|120", title: "1 Liter", description: "₹120" },
-    ],
-    PANEER: [
-      { id: "250g|150", title: "250 g", description: "₹150" },
-      { id: "500g|300", title: "500 g", description: "₹300" },
-    ],
-    GHEE: [
-      { id: "250g|250", title: "250 g", description: "₹250" },
-      { id: "500g|500", title: "500 g", description: "₹500" },
     ],
   };
 
@@ -142,7 +130,7 @@ async function timeMenu(to) {
       type: "list",
       body: { text: "Choose delivery time" },
       action: {
-        button: "Delivery Time",
+        button: "Time",
         sections: [
           {
             title: "Slots",
@@ -196,14 +184,19 @@ app.post("/webhook", async (req, res) => {
     if (!msg) return res.sendStatus(200);
 
     const from = msg.from;
-
     const replyId =
       msg.interactive?.list_reply?.id ||
       msg.interactive?.button_reply?.id;
 
-    /* 🔴 HANDLE CONFIRM FIRST */
+    /* 🔒 BLOCK DUPLICATE WEBHOOKS */
+    if (sessions[from]?.completed) {
+      return res.sendStatus(200);
+    }
+
+    /* ✅ CONFIRM HANDLER (FIRST & FINAL) */
     if (replyId === "CONFIRM" && sessions[from]) {
       const s = sessions[from];
+      s.completed = true;
 
       const orderId = "ORD" + Date.now();
 
@@ -222,7 +215,7 @@ app.post("/webhook", async (req, res) => {
         `🙏 *Thank you for ordering from Bala Milk Store*\n\n🆔 Order ID: ${orderId}\nWe will contact you shortly.`
       );
 
-      delete sessions[from]; // 🔥 END SESSION
+      delete sessions[from]; // 🔥 HARD STOP
       return res.sendStatus(200);
     }
 
@@ -253,10 +246,10 @@ app.post("/webhook", async (req, res) => {
       return orderSummary(from);
     }
 
-    res.sendStatus(200);
+    return res.sendStatus(200);
   } catch (err) {
     console.error("Webhook Error:", err.message);
-    res.sendStatus(200);
+    return res.sendStatus(200);
   }
 });
 
@@ -269,6 +262,6 @@ app.get("/webhook", (req, res) => {
   res.sendStatus(403);
 });
 
-app.listen(PORT, () => {
-  console.log("Server running on port", PORT);
-});
+app.listen(PORT, () =>
+  console.log("✅ Server running on port", PORT)
+);

@@ -11,92 +11,88 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
 const WHATSAPP_API = `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`;
 
-let sessions = {};
+/* ================= SESSION STORE ================= */
+const sessions = {};
 
-/* -------------------- WEBHOOK VERIFY -------------------- */
+/* ================= WEBHOOK VERIFY ================= */
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
 
   if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    console.log("Webhook verified");
+    console.log("✅ Webhook verified");
     return res.status(200).send(challenge);
   }
   return res.sendStatus(403);
 });
 
-/* -------------------- WEBHOOK RECEIVE -------------------- */
+/* ================= WEBHOOK RECEIVE ================= */
 app.post("/webhook", async (req, res) => {
   try {
-    const entry = req.body.entry?.[0];
-    const change = entry?.changes?.[0];
-    const message = change?.value?.messages?.[0];
+    const message =
+      req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
 
     if (!message) return res.sendStatus(200);
 
     const from = message.from;
-    const text = message.text?.body;
-    const buttonId = message.button?.payload;
+    const btn = message.button?.payload;
+    const text = message.text?.body?.toLowerCase();
 
-    console.log("Incoming:", text || buttonId);
+    console.log("📩 Incoming:", btn || text);
 
     if (!sessions[from]) {
       sessions[from] = { step: "MENU" };
-      await sendMenu(from);
+      await sendMainMenu(from);
       return res.sendStatus(200);
     }
 
     const s = sessions[from];
 
-    /* -------- BACK -------- */
-    if (buttonId === "BACK") {
+    /* ---------- BACK BUTTON ---------- */
+    if (btn === "BACK") {
       s.step = "MENU";
-      await sendMenu(from);
+      await sendMainMenu(from);
       return res.sendStatus(200);
     }
 
-    /* -------- FLOW -------- */
+    /* ================= FLOW ================= */
     switch (s.step) {
+      /* ---------- MENU ---------- */
       case "MENU":
-        if (buttonId === "BUFFALO") {
-          s.product = "Buffalo Milk";
-          s.price = 100;
-        } else if (buttonId === "COW") {
-          s.product = "Cow Milk";
-          s.price = 120;
-        } else {
-          await sendMenu(from);
-          return res.sendStatus(200);
+        handleMenuSelection(btn, s);
+        if (!s.product && btn !== "OWNER") {
+          await sendMainMenu(from);
+          break;
+        }
+
+        if (btn === "OWNER") {
+          await sendText(from, "📞 Owner will contact you shortly.");
+          delete sessions[from];
+          break;
         }
 
         s.step = "QTY";
         await sendQuantity(from, s);
         break;
 
+      /* ---------- QUANTITY ---------- */
       case "QTY":
-        if (buttonId === "Q500") {
-          s.qty = "500 ml";
-          s.total = s.price / 2;
-        } else if (buttonId === "Q1") {
-          s.qty = "1 L";
-          s.total = s.price;
-        } else if (buttonId === "Q2") {
-          s.qty = "2 L";
-          s.total = s.price * 2;
-        } else {
+        handleQuantity(btn, s);
+        if (!s.qty) {
           await sendQuantity(from, s);
-          return res.sendStatus(200);
+          break;
         }
 
-        s.step = "CONFIRM";
-        await sendConfirm(from, s);
+        s.step = "SUMMARY";
+        await sendSummary(from, s);
         break;
 
-      case "CONFIRM":
+      /* ---------- SUMMARY ---------- */
+      case "SUMMARY":
         await sendText(
           from,
-          `✅ *Order received*\n\n🍼 ${s.product}\n📦 ${s.qty}\n💰 ₹${s.total}\n\n🙏 Our team will contact you shortly.`
+          `✅ *Order received!*\n\n🛒 ${s.product}\n📦 ${s.qty}\n💰 ₹${s.total}\n\n🙏 Thank you for ordering from *Bala Milk Store* 🥛`
         );
         delete sessions[from];
         break;
@@ -104,18 +100,56 @@ app.post("/webhook", async (req, res) => {
 
     res.sendStatus(200);
   } catch (err) {
-    console.error("Webhook Error:", err.response?.data || err.message);
+    console.error("❌ Webhook Error:", err.response?.data || err.message);
     res.sendStatus(200);
   }
 });
 
-/* -------------------- SENDERS -------------------- */
+/* ================= HELPERS ================= */
 
-async function sendMenu(to) {
-  await sendButtons(to, "🥛 *Bala Milk Dairy*\nSelect product:", [
-    { id: "BUFFALO", title: "Buffalo Milk ₹100/L" },
-    { id: "COW", title: "Cow Milk ₹120/L" },
-  ]);
+function handleMenuSelection(btn, s) {
+  const products = {
+    BUFFALO: { name: "Buffalo Milk", price: 100 },
+    COW: { name: "Cow Milk", price: 120 },
+    PANEER: { name: "Paneer", price: 600 },
+    GHEE: { name: "Ghee", price: 1000 },
+    SUBS: { name: "Daily Milk Subscription", price: 0 },
+  };
+
+  if (products[btn]) {
+    s.product = products[btn].name;
+    s.price = products[btn].price;
+  }
+}
+
+function handleQuantity(btn, s) {
+  const map = {
+    Q500: { qty: "500 ml", mul: 0.5 },
+    Q1: { qty: "1 L", mul: 1 },
+    Q2: { qty: "2 L", mul: 2 },
+  };
+
+  if (!map[btn]) return;
+
+  s.qty = map[btn].qty;
+  s.total = s.price * map[btn].mul;
+}
+
+/* ================= SENDERS ================= */
+
+async function sendMainMenu(to) {
+  await sendButtons(
+    to,
+    `🥛 *Welcome to Bala Milk Store*\n\nPlease choose an option:`,
+    [
+      { id: "BUFFALO", title: "Buffalo Milk ₹100/L" },
+      { id: "COW", title: "Cow Milk ₹120/L" },
+      { id: "PANEER", title: "Paneer ₹600/Kg" },
+      { id: "GHEE", title: "Ghee ₹1000/Kg" },
+      { id: "SUBS", title: "Daily Milk Subscription" },
+      { id: "OWNER", title: "Talk to Owner" },
+    ]
+  );
 }
 
 async function sendQuantity(to, s) {
@@ -131,10 +165,11 @@ async function sendQuantity(to, s) {
   );
 }
 
-async function sendConfirm(to, s) {
-  await sendText(
+async function sendSummary(to, s) {
+  await sendButtons(
     to,
-    `🧾 *Order Summary*\n\n🍼 ${s.product}\n📦 ${s.qty}\n💰 ₹${s.total}\n\nReply anything to confirm`
+    `🧾 *Order Summary*\n\n🛒 ${s.product}\n📦 ${s.qty}\n💰 ₹${s.total}\n\nConfirm order?`,
+    [{ id: "CONFIRM", title: "Confirm ✅" }, { id: "BACK", title: "⬅ Back" }]
   );
 }
 
@@ -183,7 +218,7 @@ async function sendButtons(to, body, buttons) {
   );
 }
 
-/* -------------------- START SERVER -------------------- */
+/* ================= START ================= */
 app.listen(PORT, () => {
-  console.log("Server running on port", PORT);
+  console.log("🚀 Server running on port", PORT);
 });

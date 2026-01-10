@@ -5,179 +5,204 @@ const app = express();
 app.use(express.json());
 
 const TOKEN = process.env.WHATSAPP_TOKEN;
-const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
+const PHONE_ID = process.env.PHONE_NUMBER_ID;
 const PORT = process.env.PORT || 10000;
 
-/* ---------------- HEALTH CHECK ---------------- */
-app.get("/", (req, res) => {
-  res.send("WhatsApp Bot is Running ✅");
-});
+// simple in-memory session
+const sessions = {};
 
-/* ---------------- WEBHOOK VERIFY ---------------- */
+app.get("/", (req, res) => res.send("Bot Running ✅"));
+
+/* ---------------- VERIFY ---------------- */
 app.get("/webhook", (req, res) => {
-  const VERIFY_TOKEN = "mytoken123";
-
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-
-  if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    console.log("✅ Webhook verified");
-    res.status(200).send(challenge);
-  } else {
-    res.sendStatus(403);
+  if (req.query["hub.verify_token"] === "mytoken123") {
+    return res.send(req.query["hub.challenge"]);
   }
+  res.sendStatus(403);
 });
 
-/* ---------------- WEBHOOK RECEIVE ---------------- */
+/* ---------------- WEBHOOK ---------------- */
 app.post("/webhook", async (req, res) => {
   try {
-    const entry = req.body.entry?.[0];
-    const changes = entry?.changes?.[0];
-    const value = changes?.value;
+    const msg = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    if (!msg) return res.sendStatus(200);
 
-    if (!value?.messages) {
-      return res.sendStatus(200);
-    }
+    const from = msg.from;
+    sessions[from] ||= {};
 
-    const message = value.messages[0];
-    const from = message.from;
+    console.log("INCOMING:", JSON.stringify(msg, null, 2));
 
-    console.log("📩 Incoming:", JSON.stringify(message, null, 2));
+    if (msg.type === "text") {
+      if (msg.text.body.toLowerCase() === "hi") {
+        return sendMainMenu(from);
+      }
 
-    // TEXT MESSAGE
-    if (message.type === "text") {
-      const text = message.text.body.toLowerCase();
-
-      if (text === "hi" || text === "hello") {
-        await sendMainMenu(from);
-      } else {
-        await sendText(from, "Please use menu buttons ⬇️");
+      // address typed
+      if (sessions[from].step === "ADDRESS_TEXT") {
+        sessions[from].address = msg.text.body;
+        return askDeliveryTime(from);
       }
     }
 
-    // BUTTON REPLY
-    if (message.type === "interactive") {
-      const id = message.interactive.button_reply.id;
-      await handleButton(from, id);
+    if (msg.type === "location") {
+      sessions[from].location = msg.location;
+      return askDeliveryTime(from);
+    }
+
+    if (msg.type === "interactive") {
+      await handleButton(from, msg.interactive.button_reply.id);
     }
 
     res.sendStatus(200);
-  } catch (err) {
-    console.error("❌ Webhook Error:", err.response?.data || err.message);
+  } catch (e) {
+    console.error(e.response?.data || e.message);
     res.sendStatus(200);
   }
 });
 
 /* ---------------- BUTTON HANDLER ---------------- */
 async function handleButton(to, id) {
-  switch (id) {
-    case "BUFFALO":
-      await sendText(to, "🐃 Buffalo Milk\n₹100 / L");
-      break;
+  if (id === "BACK") return sendMainMenu(to);
 
-    case "COW":
-      await sendText(to, "🐄 Cow Milk\n₹120 / L");
-      break;
+  // PRODUCTS
+  if (["BUFFALO", "COW", "PANEER", "GHEE"].includes(id)) {
+    sessions[to] = { product: id };
+    return askQuantity(to, id);
+  }
 
-    case "PANEER":
-      await sendText(to, "🧀 Paneer\n₹600 / Kg");
-      break;
+  // QUANTITY
+  if (id.startsWith("Q_")) {
+    const [_, qty, price] = id.split("_");
+    sessions[to].quantity = qty;
+    sessions[to].price = price;
+    return askAddress(to);
+  }
 
-    case "GHEE":
-      await sendText(to, "🧈 Ghee\n₹1000 / Kg");
-      break;
+  // DELIVERY TIME
+  if (id === "MORNING" || id === "EVENING") {
+    sessions[to].delivery = id;
+    return sendSummary(to);
+  }
 
-    case "SUBSCRIPTION":
-      await sendText(to, "📆 Daily Milk Subscription\nOwner will contact you");
-      break;
+  if (id === "CONFIRM") {
+    await sendText(to, "✅ Order Confirmed!\nThank you 🙏");
+    delete sessions[to];
+    return;
+  }
 
-    case "OWNER":
-      await sendText(to, "📞 Owner Contact: +91XXXXXXXXXX");
-      break;
-
-    default:
-      await sendText(to, "Please choose from menu ⬇️");
+  if (id === "CANCEL") {
+    await sendText(to, "❌ Order Cancelled");
+    delete sessions[to];
+    return;
   }
 }
 
-/* ---------------- MAIN MENU ---------------- */
+/* ---------------- MENUS ---------------- */
 async function sendMainMenu(to) {
-  await axios.post(
-    `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
-    {
-      messaging_product: "whatsapp",
-      to,
-      type: "interactive",
-      interactive: {
-        type: "button",
-        body: {
-          text: "🥛 *Welcome to Bala Milk Store*\n\nPlease choose an option:"
-        },
-        action: {
-          buttons: [
-            { type: "reply", reply: { id: "BUFFALO", title: "🐃 Buffalo Milk" } },
-            { type: "reply", reply: { id: "COW", title: "🐄 Cow Milk" } },
-            { type: "reply", reply: { id: "PANEER", title: "🧀 Paneer" } }
-          ]
-        }
-      }
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${TOKEN}`,
-        "Content-Type": "application/json"
-      }
-    }
+  await sendButtons(to,
+    "🥛 *Bala Milk Store*\nSelect Product",
+    [
+      { id: "BUFFALO", title: "🐃 Buffalo Milk" },
+      { id: "COW", title: "🐄 Cow Milk" },
+      { id: "PANEER", title: "🧀 Paneer" }
+    ]
   );
 
-  // second row (WhatsApp allows only 3 buttons per message)
-  await axios.post(
-    `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
-    {
-      messaging_product: "whatsapp",
-      to,
-      type: "interactive",
-      interactive: {
-        type: "button",
-        body: { text: "More options ⬇️" },
-        action: {
-          buttons: [
-            { type: "reply", reply: { id: "GHEE", title: "🧈 Ghee" } },
-            { type: "reply", reply: { id: "SUBSCRIPTION", title: "📆 Subscription" } },
-            { type: "reply", reply: { id: "OWNER", title: "📞 Talk to Owner" } }
-          ]
-        }
-      }
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${TOKEN}`,
-        "Content-Type": "application/json"
-      }
-    }
+  await sendButtons(to,
+    "More options",
+    [
+      { id: "GHEE", title: "🧈 Ghee" },
+      { id: "BACK", title: "⬅ Back" }
+    ]
   );
 }
 
-/* ---------------- TEXT MESSAGE ---------------- */
+/* ---------------- QUANTITY ---------------- */
+async function askQuantity(to, product) {
+  let options = [];
+
+  if (product === "BUFFALO")
+    options = [
+      { id: "Q_500ml_50", title: "500ml – ₹50" },
+      { id: "Q_1L_100", title: "1L – ₹100" },
+      { id: "Q_2L_200", title: "2L – ₹200" }
+    ];
+
+  if (product === "PANEER")
+    options = [
+      { id: "Q_250g_150", title: "250g – ₹150" },
+      { id: "Q_500g_300", title: "500g – ₹300" },
+      { id: "Q_1kg_600", title: "1Kg – ₹600" }
+    ];
+
+  await sendButtons(to, "Select Quantity", options);
+}
+
+/* ---------------- ADDRESS ---------------- */
+async function askAddress(to) {
+  sessions[to].step = "ADDRESS_TEXT";
+  await sendText(to, "✍️ Please type delivery address\nOR share live location 📍");
+}
+
+/* ---------------- DELIVERY TIME ---------------- */
+async function askDeliveryTime(to) {
+  await sendButtons(to,
+    "Select Delivery Time",
+    [
+      { id: "MORNING", title: "🌅 Morning" },
+      { id: "EVENING", title: "🌙 Evening" }
+    ]
+  );
+}
+
+/* ---------------- SUMMARY ---------------- */
+async function sendSummary(to) {
+  const s = sessions[to];
+  await sendButtons(
+    to,
+    `🧾 *Order Summary*\n
+Product: ${s.product}
+Quantity: ${s.quantity}
+Price: ₹${s.price}
+Delivery: ${s.delivery}`,
+    [
+      { id: "CONFIRM", title: "✅ Confirm Order" },
+      { id: "CANCEL", title: "❌ Cancel" }
+    ]
+  );
+}
+
+/* ---------------- HELPERS ---------------- */
+async function sendButtons(to, text, buttons) {
+  await axios.post(
+    `https://graph.facebook.com/v19.0/${PHONE_ID}/messages`,
+    {
+      messaging_product: "whatsapp",
+      to,
+      type: "interactive",
+      interactive: {
+        type: "button",
+        body: { text },
+        action: { buttons: buttons.slice(0, 3).map(b => ({
+          type: "reply",
+          reply: b
+        })) }
+      }
+    },
+    { headers: { Authorization: `Bearer ${TOKEN}` } }
+  );
+}
+
 async function sendText(to, text) {
   await axios.post(
-    `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
+    `https://graph.facebook.com/v19.0/${PHONE_ID}/messages`,
     {
       messaging_product: "whatsapp",
       to,
       text: { body: text }
     },
-    {
-      headers: {
-        Authorization: `Bearer ${TOKEN}`,
-        "Content-Type": "application/json"
-      }
-    }
+    { headers: { Authorization: `Bearer ${TOKEN}` } }
   );
 }
 
-/* ---------------- START SERVER ---------------- */
-app.listen(PORT, () => {
-  console.log("🚀 Server running on port", PORT);
-});
+app.listen(PORT, () => console.log("🚀 Server running"));

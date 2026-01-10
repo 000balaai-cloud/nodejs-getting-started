@@ -9,37 +9,33 @@ const TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
-const WHATSAPP_API = `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`;
+const API_URL = `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`;
 
-/* ================= SESSION STORE ================= */
 const sessions = {};
 
-/* ================= WEBHOOK VERIFY ================= */
+/* ================= VERIFY ================= */
 app.get("/webhook", (req, res) => {
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-
-  if (mode === "subscribe" && token === VERIFY_TOKEN) {
+  if (
+    req.query["hub.mode"] === "subscribe" &&
+    req.query["hub.verify_token"] === VERIFY_TOKEN
+  ) {
     console.log("✅ Webhook verified");
-    return res.status(200).send(challenge);
+    return res.send(req.query["hub.challenge"]);
   }
-  return res.sendStatus(403);
+  res.sendStatus(403);
 });
 
-/* ================= WEBHOOK RECEIVE ================= */
+/* ================= RECEIVE ================= */
 app.post("/webhook", async (req, res) => {
   try {
-    const message =
-      req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    const msg = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    if (!msg) return res.sendStatus(200);
 
-    if (!message) return res.sendStatus(200);
+    const from = msg.from;
+    const text = msg.text?.body?.toLowerCase();
+    const replyId = msg.interactive?.list_reply?.id || msg.interactive?.button_reply?.id;
 
-    const from = message.from;
-    const btn = message.button?.payload;
-    const text = message.text?.body?.toLowerCase();
-
-    console.log("📩 Incoming:", btn || text);
+    console.log("📩 Incoming:", text || replyId);
 
     if (!sessions[from]) {
       sessions[from] = { step: "MENU" };
@@ -49,151 +45,134 @@ app.post("/webhook", async (req, res) => {
 
     const s = sessions[from];
 
-    /* ---------- BACK BUTTON ---------- */
-    if (btn === "BACK") {
+    /* BACK */
+    if (replyId === "BACK") {
       s.step = "MENU";
       await sendMainMenu(from);
       return res.sendStatus(200);
     }
 
-    /* ================= FLOW ================= */
     switch (s.step) {
-      /* ---------- MENU ---------- */
+      /* -------- MENU -------- */
       case "MENU":
-        handleMenuSelection(btn, s);
-        if (!s.product && btn !== "OWNER") {
+        handleProduct(replyId, s);
+        if (!s.product) {
           await sendMainMenu(from);
           break;
         }
-
-        if (btn === "OWNER") {
-          await sendText(from, "📞 Owner will contact you shortly.");
-          delete sessions[from];
-          break;
-        }
-
         s.step = "QTY";
         await sendQuantity(from, s);
         break;
 
-      /* ---------- QUANTITY ---------- */
+      /* -------- QTY -------- */
       case "QTY":
-        handleQuantity(btn, s);
+        handleQty(replyId, s);
         if (!s.qty) {
           await sendQuantity(from, s);
           break;
         }
-
-        s.step = "SUMMARY";
-        await sendSummary(from, s);
+        s.step = "CONFIRM";
+        await sendConfirm(from, s);
         break;
 
-      /* ---------- SUMMARY ---------- */
-      case "SUMMARY":
+      /* -------- CONFIRM -------- */
+      case "CONFIRM":
         await sendText(
           from,
-          `✅ *Order received!*\n\n🛒 ${s.product}\n📦 ${s.qty}\n💰 ₹${s.total}\n\n🙏 Thank you for ordering from *Bala Milk Store* 🥛`
+          `✅ *Order Confirmed!*\n\n🛒 ${s.product}\n📦 ${s.qty}\n💰 ₹${s.total}\n\n🙏 Thank you for ordering from *Bala Milk Store* 🥛`
         );
         delete sessions[from];
         break;
     }
 
     res.sendStatus(200);
-  } catch (err) {
-    console.error("❌ Webhook Error:", err.response?.data || err.message);
+  } catch (e) {
+    console.error("❌ Error:", e.response?.data || e.message);
     res.sendStatus(200);
   }
 });
 
-/* ================= HELPERS ================= */
+/* ================= LOGIC ================= */
 
-function handleMenuSelection(btn, s) {
-  const products = {
+function handleProduct(id, s) {
+  const map = {
     BUFFALO: { name: "Buffalo Milk", price: 100 },
     COW: { name: "Cow Milk", price: 120 },
     PANEER: { name: "Paneer", price: 600 },
     GHEE: { name: "Ghee", price: 1000 },
     SUBS: { name: "Daily Milk Subscription", price: 0 },
+    OWNER: { name: "Talk to Owner", price: 0 },
   };
-
-  if (products[btn]) {
-    s.product = products[btn].name;
-    s.price = products[btn].price;
+  if (map[id]) {
+    s.product = map[id].name;
+    s.price = map[id].price;
   }
 }
 
-function handleQuantity(btn, s) {
-  const map = {
-    Q500: { qty: "500 ml", mul: 0.5 },
-    Q1: { qty: "1 L", mul: 1 },
-    Q2: { qty: "2 L", mul: 2 },
+function handleQty(id, s) {
+  const q = {
+    Q500: { q: "500 ml", m: 0.5 },
+    Q1: { q: "1 L", m: 1 },
+    Q2: { q: "2 L", m: 2 },
   };
-
-  if (!map[btn]) return;
-
-  s.qty = map[btn].qty;
-  s.total = s.price * map[btn].mul;
+  if (!q[id]) return;
+  s.qty = q[id].q;
+  s.total = s.price * q[id].m;
 }
 
 /* ================= SENDERS ================= */
 
 async function sendMainMenu(to) {
-  await sendButtons(
-    to,
-    `🥛 *Welcome to Bala Milk Store*\n\nPlease choose an option:`,
-    [
-      { id: "BUFFALO", title: "Buffalo Milk ₹100/L" },
-      { id: "COW", title: "Cow Milk ₹120/L" },
-      { id: "PANEER", title: "Paneer ₹600/Kg" },
-      { id: "GHEE", title: "Ghee ₹1000/Kg" },
-      { id: "SUBS", title: "Daily Milk Subscription" },
-      { id: "OWNER", title: "Talk to Owner" },
-    ]
+  await axios.post(
+    API_URL,
+    {
+      messaging_product: "whatsapp",
+      to,
+      type: "interactive",
+      interactive: {
+        type: "list",
+        body: { text: "🥛 *Welcome to Bala Milk Store*\n\nPlease choose an option:" },
+        action: {
+          button: "View Menu",
+          sections: [
+            {
+              title: "Milk Products",
+              rows: [
+                { id: "BUFFALO", title: "Buffalo Milk", description: "₹100 / L" },
+                { id: "COW", title: "Cow Milk", description: "₹120 / L" },
+                { id: "PANEER", title: "Paneer", description: "₹600 / Kg" },
+                { id: "GHEE", title: "Ghee", description: "₹1000 / Kg" },
+                { id: "SUBS", title: "Daily Milk Subscription" },
+                { id: "OWNER", title: "Talk to Owner" },
+              ],
+            },
+          ],
+        },
+      },
+    },
+    auth()
   );
 }
 
 async function sendQuantity(to, s) {
-  await sendButtons(
-    to,
-    `🧾 *${s.product}*\nSelect quantity:`,
-    [
-      { id: "Q500", title: "500 ml" },
-      { id: "Q1", title: "1 L" },
-      { id: "Q2", title: "2 L" },
-      { id: "BACK", title: "⬅ Back" },
-    ]
-  );
+  await sendButtons(to, `🧾 *${s.product}*\nChoose quantity:`, [
+    { id: "Q500", title: "500 ml" },
+    { id: "Q1", title: "1 L" },
+    { id: "Q2", title: "2 L" },
+  ]);
 }
 
-async function sendSummary(to, s) {
+async function sendConfirm(to, s) {
   await sendButtons(
     to,
-    `🧾 *Order Summary*\n\n🛒 ${s.product}\n📦 ${s.qty}\n💰 ₹${s.total}\n\nConfirm order?`,
+    `🧾 *Confirm Order*\n\n${s.product}\n${s.qty}\n₹${s.total}`,
     [{ id: "CONFIRM", title: "Confirm ✅" }, { id: "BACK", title: "⬅ Back" }]
-  );
-}
-
-async function sendText(to, text) {
-  await axios.post(
-    WHATSAPP_API,
-    {
-      messaging_product: "whatsapp",
-      to,
-      type: "text",
-      text: { body: text },
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${TOKEN}`,
-        "Content-Type": "application/json",
-      },
-    }
   );
 }
 
 async function sendButtons(to, body, buttons) {
   await axios.post(
-    WHATSAPP_API,
+    API_URL,
     {
       messaging_product: "whatsapp",
       to,
@@ -202,20 +181,37 @@ async function sendButtons(to, body, buttons) {
         type: "button",
         body: { text: body },
         action: {
-          buttons: buttons.map((b) => ({
+          buttons: buttons.map(b => ({
             type: "reply",
             reply: { id: b.id, title: b.title },
           })),
         },
       },
     },
-    {
-      headers: {
-        Authorization: `Bearer ${TOKEN}`,
-        "Content-Type": "application/json",
-      },
-    }
+    auth()
   );
+}
+
+async function sendText(to, body) {
+  await axios.post(
+    API_URL,
+    {
+      messaging_product: "whatsapp",
+      to,
+      type: "text",
+      text: { body },
+    },
+    auth()
+  );
+}
+
+function auth() {
+  return {
+    headers: {
+      Authorization: `Bearer ${TOKEN}`,
+      "Content-Type": "application/json",
+    },
+  };
 }
 
 /* ================= START ================= */

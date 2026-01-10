@@ -4,19 +4,21 @@ import axios from "axios";
 const app = express();
 app.use(express.json());
 
-/* ================= ENV ================= */
+/* ================= CONFIG ================= */
+
 const PORT = process.env.PORT || 10000;
+const PHONE_ID = process.env.PHONE_NUMBER_ID;
 const TOKEN = process.env.WHATSAPP_TOKEN;
-const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const SHEET_URL = process.env.GOOGLE_SHEET_URL;
 
-const WA_URL = `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`;
+const WA_URL = `https://graph.facebook.com/v18.0/${PHONE_ID}/messages`;
 
-/* ================= SESSION ================= */
+/* ================= MEMORY ================= */
+
 const sessions = {};
 
 /* ================= HELPERS ================= */
+
 async function send(payload) {
   await axios.post(WA_URL, payload, {
     headers: {
@@ -26,8 +28,12 @@ async function send(payload) {
   });
 }
 
-const textMsg = (to, body) =>
-  send({ messaging_product: "whatsapp", to, text: { body } });
+const sendText = (to, body) =>
+  send({
+    messaging_product: "whatsapp",
+    to,
+    text: { body },
+  });
 
 /* ================= MENUS ================= */
 
@@ -64,7 +70,7 @@ async function quantityMenu(to, product) {
   sessions[to].step = "QTY";
   sessions[to].product = product;
 
-  const qtyMap = {
+  const map = {
     BUFFALO: [
       { id: "500ml|50", title: "500 ml", description: "₹50" },
       { id: "1L|100", title: "1 Liter", description: "₹100" },
@@ -80,7 +86,7 @@ async function quantityMenu(to, product) {
     ],
     GHEE: [
       { id: "250g|250", title: "250 g", description: "₹250" },
-      { id: "500g|500", title: "500 g", description: "₹500" },
+      { id: "500g|500", title: "₹500", description: "₹500" },
     ],
   };
 
@@ -94,7 +100,7 @@ async function quantityMenu(to, product) {
       action: {
         button: "Quantity",
         sections: [
-          { title: "Options", rows: qtyMap[product] },
+          { title: "Options", rows: map[product] },
           { title: "Navigation", rows: [{ id: "BACK_MENU", title: "⬅ Back" }] },
         ],
       },
@@ -120,7 +126,6 @@ async function addressMenu(to) {
             rows: [
               { id: "LIVE", title: "📍 Share Live Location" },
               { id: "TYPE", title: "✍ Type Address" },
-              { id: "BACK_QTY", title: "⬅ Back" },
             ],
           },
         ],
@@ -140,14 +145,13 @@ async function timeMenu(to) {
       type: "list",
       body: { text: "Choose delivery time" },
       action: {
-        button: "Time",
+        button: "Delivery Time",
         sections: [
           {
             title: "Slots",
             rows: [
               { id: "Morning", title: "🌅 Morning (6–9 AM)" },
               { id: "Evening", title: "🌆 Evening (5–8 PM)" },
-              { id: "BACK_ADDR", title: "⬅ Back" },
             ],
           },
         ],
@@ -176,8 +180,10 @@ async function orderSummary(to) {
       },
       action: {
         buttons: [
-          { type: "reply", reply: { id: "CONFIRM", title: "✅ Confirm Order" } },
-          { type: "reply", reply: { id: "BACK_TIME", title: "⬅ Back" } },
+          {
+            type: "reply",
+            reply: { id: "CONFIRM", title: "✅ Confirm Order" },
+          },
         ],
       },
     },
@@ -192,46 +198,57 @@ app.post("/webhook", async (req, res) => {
     if (!msg) return res.sendStatus(200);
 
     const from = msg.from;
+
     const replyId =
       msg.interactive?.list_reply?.id ||
-      msg.interactive?.button_reply?.id ||
-      msg.text?.body?.toLowerCase();
+      msg.interactive?.button_reply?.id;
 
-    if (!sessions[from] && ["hi", "menu", "start"].includes(replyId)) {
+    // New user
+    if (!sessions[from]) {
       await mainMenu(from);
       return res.sendStatus(200);
     }
 
     const s = sessions[from];
-    if (!s) return res.sendStatus(200);
 
-    /* ---- Navigation ---- */
-    if (replyId === "BACK_MENU") return mainMenu(from);
-    if (replyId === "BACK_QTY") return quantityMenu(from, s.product);
-    if (replyId === "BACK_ADDR") return addressMenu(from);
-    if (replyId === "BACK_TIME") return timeMenu(from);
+    /* ===== MENU ===== */
+    if (s.step === "MENU") {
+      return quantityMenu(from, replyId);
+    }
 
-    /* ---- Flow ---- */
-    if (s.step === "MENU") return quantityMenu(from, replyId);
-
+    /* ===== QTY ===== */
     if (s.step === "QTY") {
+      if (replyId === "BACK_MENU") return mainMenu(from);
+
       const [qty, price] = replyId.split("|");
       s.quantity = qty;
       s.price = price;
+
       return addressMenu(from);
     }
 
+    /* ===== ADDRESS ===== */
     if (s.step === "ADDRESS") {
-      s.address = replyId === "LIVE" ? "Live Location" : "Typed Address";
+      if (replyId === "LIVE") {
+        s.address = "Live Location";
+      } else {
+        s.address = "Typed Address";
+      }
       return timeMenu(from);
     }
 
+    /* ===== TIME ===== */
     if (s.step === "TIME") {
       s.time = replyId;
       return orderSummary(from);
     }
 
+    /* ===== CONFIRM ===== */
     if (replyId === "CONFIRM") {
+      // 🔒 STOP DUPLICATE CONFIRM
+      if (s.confirmed) return res.sendStatus(200);
+      s.confirmed = true;
+
       const orderId = "ORD" + Date.now();
 
       await axios.post(SHEET_URL, {
@@ -244,17 +261,19 @@ app.post("/webhook", async (req, res) => {
         deliveryTime: s.time,
       });
 
-      await textMsg(
+      await sendText(
         from,
         `🙏 *Thank you for ordering from Bala Milk Store*\n\n🆔 Order ID: ${orderId}\nWe will contact you shortly.`
       );
 
-      delete sessions[from]; // ✅ END SESSION
+      // 🔥 END SESSION (NO MENU AFTER THIS)
+      delete sessions[from];
+      return res.sendStatus(200);
     }
 
     res.sendStatus(200);
   } catch (err) {
-    console.error("Webhook error:", err.message);
+    console.error("Webhook Error:", err.message);
     res.sendStatus(200);
   }
 });
@@ -262,10 +281,14 @@ app.post("/webhook", async (req, res) => {
 /* ================= VERIFY ================= */
 
 app.get("/webhook", (req, res) => {
-  if (req.query["hub.verify_token"] === VERIFY_TOKEN) {
+  if (req.query["hub.verify_token"] === process.env.VERIFY_TOKEN) {
     return res.send(req.query["hub.challenge"]);
   }
   res.sendStatus(403);
 });
 
-app.listen(PORT, () => console.log("Server running on", PORT));
+/* ================= START ================= */
+
+app.listen(PORT, () => {
+  console.log("Server running on port", PORT);
+});

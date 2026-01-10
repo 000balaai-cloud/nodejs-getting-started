@@ -4,20 +4,15 @@ import axios from "axios";
 const app = express();
 app.use(express.json());
 
-/* ================= CONFIG ================= */
+/* ================== CONFIG ================== */
 
-const PORT = process.env.PORT || 10000;
-const PHONE_ID = process.env.PHONE_NUMBER_ID;
+const WA_URL = `https://graph.facebook.com/v18.0/${process.env.PHONE_NUMBER_ID}/messages`;
 const TOKEN = process.env.WHATSAPP_TOKEN;
 const SHEET_URL = process.env.GOOGLE_SHEET_URL;
 
-const WA_URL = `https://graph.facebook.com/v18.0/${PHONE_ID}/messages`;
-
-/* ================= MEMORY ================= */
-
 const sessions = {};
 
-/* ================= HELPERS ================= */
+/* ================== HELPERS ================== */
 
 async function send(payload) {
   await axios.post(WA_URL, payload, {
@@ -31,10 +26,10 @@ async function send(payload) {
 const sendText = (to, body) =>
   send({ messaging_product: "whatsapp", to, text: { body } });
 
-/* ================= MENUS ================= */
+/* ================== MENUS ================== */
 
 async function mainMenu(to) {
-  sessions[to] = { step: "MENU", completed: false };
+  sessions[to] = { step: "MENU" };
 
   await send({
     messaging_product: "whatsapp",
@@ -63,11 +58,10 @@ async function mainMenu(to) {
 }
 
 async function quantityMenu(to, product) {
-  const s = sessions[to];
-  s.step = "QTY";
-  s.product = product;
+  sessions[to].step = "QTY";
+  sessions[to].product = product;
 
-  const map = {
+  const options = {
     BUFFALO: [
       { id: "500ml|50", title: "500 ml", description: "₹50" },
       { id: "1L|100", title: "1 Liter", description: "₹100" },
@@ -75,6 +69,14 @@ async function quantityMenu(to, product) {
     COW: [
       { id: "500ml|60", title: "500 ml", description: "₹60" },
       { id: "1L|120", title: "1 Liter", description: "₹120" },
+    ],
+    PANEER: [
+      { id: "250g|150", title: "250 g", description: "₹150" },
+      { id: "500g|300", title: "500 g", description: "₹300" },
+    ],
+    GHEE: [
+      { id: "250g|250", title: "250 g", description: "₹250" },
+      { id: "500g|500", title: "500 g", description: "₹500" },
     ],
   };
 
@@ -87,7 +89,10 @@ async function quantityMenu(to, product) {
       body: { text: "Select quantity" },
       action: {
         button: "Quantity",
-        sections: [{ title: "Options", rows: map[product] }],
+        sections: [
+          { title: "Options", rows: options[product] },
+          { title: "Navigation", rows: [{ id: "BACK_MENU", title: "⬅ Back" }] },
+        ],
       },
     },
   });
@@ -147,7 +152,6 @@ async function timeMenu(to) {
 
 async function orderSummary(to) {
   const s = sessions[to];
-  s.step = "CONFIRM";
 
   await send({
     messaging_product: "whatsapp",
@@ -166,38 +170,73 @@ async function orderSummary(to) {
       },
       action: {
         buttons: [
-          {
-            type: "reply",
-            reply: { id: "CONFIRM", title: "✅ Confirm Order" },
-          },
+          { type: "reply", reply: { id: "CONFIRM", title: "✅ Confirm Order" } },
         ],
       },
     },
   });
 }
 
-/* ================= WEBHOOK ================= */
+/* ================== WEBHOOK ================== */
 
 app.post("/webhook", async (req, res) => {
   try {
-    const msg = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    const msg =
+      req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
     if (!msg) return res.sendStatus(200);
 
     const from = msg.from;
+    const msgType = msg.type;
+
+    /* 🚫 IGNORE NON-USER EVENTS (THIS FIXES YOUR ISSUE) */
+    if (!["interactive", "text", "location"].includes(msgType)) {
+      return res.sendStatus(200);
+    }
+
     const replyId =
       msg.interactive?.list_reply?.id ||
       msg.interactive?.button_reply?.id;
 
-    /* 🔒 BLOCK DUPLICATE WEBHOOKS */
-    if (sessions[from]?.completed) {
+    /* 🔹 Start menu ONLY when user types */
+    if (!sessions[from] && msgType === "text") {
+      await mainMenu(from);
       return res.sendStatus(200);
     }
 
-    /* ✅ CONFIRM HANDLER (FIRST & FINAL) */
-    if (replyId === "CONFIRM" && sessions[from]) {
-      const s = sessions[from];
-      s.completed = true;
+    const s = sessions[from];
+    if (!s) return res.sendStatus(200);
 
+    if (replyId === "BACK_MENU") {
+      await mainMenu(from);
+      return res.sendStatus(200);
+    }
+
+    if (s.step === "MENU") {
+      await quantityMenu(from, replyId);
+      return res.sendStatus(200);
+    }
+
+    if (s.step === "QTY") {
+      const [q, p] = replyId.split("|");
+      s.quantity = q;
+      s.price = p;
+      await addressMenu(from);
+      return res.sendStatus(200);
+    }
+
+    if (s.step === "ADDRESS") {
+      s.address = replyId === "LIVE" ? "Live Location" : "Typed Address";
+      await timeMenu(from);
+      return res.sendStatus(200);
+    }
+
+    if (s.step === "TIME") {
+      s.time = replyId;
+      await orderSummary(from);
+      return res.sendStatus(200);
+    }
+
+    if (replyId === "CONFIRM") {
       const orderId = "ORD" + Date.now();
 
       await axios.post(SHEET_URL, {
@@ -215,45 +254,20 @@ app.post("/webhook", async (req, res) => {
         `🙏 *Thank you for ordering from Bala Milk Store*\n\n🆔 Order ID: ${orderId}\nWe will contact you shortly.`
       );
 
-      delete sessions[from]; // 🔥 HARD STOP
+      /* 🔥 VERY IMPORTANT: CLEAR SESSION */
+      delete sessions[from];
+
       return res.sendStatus(200);
     }
 
-    /* NEW USER */
-    if (!sessions[from]) {
-      await mainMenu(from);
-      return res.sendStatus(200);
-    }
-
-    const s = sessions[from];
-
-    if (s.step === "MENU") return quantityMenu(from, replyId);
-
-    if (s.step === "QTY") {
-      const [qty, price] = replyId.split("|");
-      s.quantity = qty;
-      s.price = price;
-      return addressMenu(from);
-    }
-
-    if (s.step === "ADDRESS") {
-      s.address = replyId === "LIVE" ? "Live Location" : "Typed Address";
-      return timeMenu(from);
-    }
-
-    if (s.step === "TIME") {
-      s.time = replyId;
-      return orderSummary(from);
-    }
-
-    return res.sendStatus(200);
+    res.sendStatus(200);
   } catch (err) {
-    console.error("Webhook Error:", err.message);
-    return res.sendStatus(200);
+    console.error(err.response?.data || err.message);
+    res.sendStatus(200);
   }
 });
 
-/* ================= VERIFY ================= */
+/* ================== VERIFY ================== */
 
 app.get("/webhook", (req, res) => {
   if (req.query["hub.verify_token"] === process.env.VERIFY_TOKEN) {
@@ -262,6 +276,6 @@ app.get("/webhook", (req, res) => {
   res.sendStatus(403);
 });
 
-app.listen(PORT, () =>
-  console.log("✅ Server running on port", PORT)
+app.listen(10000, () =>
+  console.log("Server running on port 10000")
 );

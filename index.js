@@ -151,6 +151,7 @@ async function timeMenu(to) {
 
 async function summary(to) {
   const s = sessions[to];
+  s.step = "CONFIRM";
 
   await send({
     messaging_product: "whatsapp",
@@ -162,13 +163,15 @@ async function summary(to) {
         text:
           `🧾 *Order Summary*\n\n` +
           `Product: ${s.product}\n` +
-          `Qty: ${s.quantity}\n` +
+          `Quantity: ${s.quantity}\n` +
           `Price: ₹${s.price}\n` +
           `Address: ${s.address}\n` +
           `Time: ${s.time}`,
       },
       action: {
-        buttons: [{ type: "reply", reply: { id: "CONFIRM", title: "✅ Confirm Order" } }],
+        buttons: [
+          { type: "reply", reply: { id: "CONFIRM", title: "✅ Confirm Order" } }
+        ],
       },
     },
   });
@@ -193,6 +196,29 @@ app.post("/webhook", async (req, res) => {
 
     const s = sessions[from];
 
+    // ✅ CONFIRM FIRST
+    if (s.step === "CONFIRM" && replyId === "CONFIRM") {
+      const orderId = "ORD" + Date.now();
+
+      await axios.post(SHEET_URL, {
+        orderId,
+        phone: from,
+        product: s.product,
+        quantity: s.quantity,
+        price: s.price,
+        address: s.address,
+        deliveryTime: s.time,
+      });
+
+      await text(
+        from,
+        `🙏 *Thank you for ordering from Bala Milk Store*\n\n🆔 Order ID: ${orderId}\nWe will contact you shortly.`
+      );
+
+      delete sessions[from];
+      return res.sendStatus(200);
+    }
+
     if (s.step === "MENU") return quantityMenu(from, replyId);
 
     if (s.step === "QTY") {
@@ -212,31 +238,9 @@ app.post("/webhook", async (req, res) => {
       return summary(from);
     }
 
-    if (replyId === "CONFIRM") {
-      const orderId = "ORD" + Date.now();
-
-      await axios.post(SHEET_URL, {
-        orderId,
-        phone: from,
-        product: s.product,
-        quantity: s.quantity,
-        price: s.price,
-        address: s.address,
-        deliveryTime: s.time,
-      });
-
-      await text(
-        from,
-        `🙏 *Thank you for ordering from Bala Milk Store*\n\nOrder ID: ${orderId}\nWe will contact you shortly.`
-      );
-
-      delete sessions[from];
-      await mainMenu(from);
-    }
-
     res.sendStatus(200);
   } catch (e) {
-    console.error(e.message);
+    console.error(e);
     res.sendStatus(200);
   }
 });

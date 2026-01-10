@@ -1,206 +1,108 @@
-const express = require("express");
-const axios = require("axios");
+import express from "express";
+import axios from "axios";
 
 const app = express();
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
 const TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
+const PORT = process.env.PORT || 10000;
 
-let sessions = {};
-
-// ---------- PRODUCTS ----------
-const PRODUCTS = {
-  buffalo: { name: "Buffalo Milk", price: 100, type: "MILK" },
-  cow: { name: "Cow Milk", price: 120, type: "MILK" },
-  paneer: { name: "Paneer", price: 600, type: "PANEER" },
-  ghee: { name: "Ghee", price: 1000, type: "GHEE" }
-};
-
-// ---------- WEBHOOK ----------
-app.post("/webhook", async (req, res) => {
-  const entry = req.body.entry?.[0]?.changes?.[0]?.value;
-  const msg = entry?.messages?.[0];
-  if (!msg) return res.sendStatus(200);
-
-  const from = msg.from;
-  const type = msg.type;
-
-  if (!sessions[from]) sessions[from] = { step: "MENU" };
-  const s = sessions[from];
-
-  // ---------- BUTTON CLICK ----------
-  if (type === "interactive") {
-    const id = msg.interactive.button_reply.id;
-
-    // BACK BUTTON
-    if (id === "BACK") {
-      s.step = "MENU";
-      return sendMainMenu(from);
-    }
-
-    switch (s.step) {
-
-      // ---------- PRODUCT ----------
-      case "MENU":
-        s.product = PRODUCTS[id];
-        s.step = "QUANTITY";
-        return sendQuantityMenu(from, s.product);
-
-      // ---------- QUANTITY ----------
-      case "QUANTITY":
-        s.quantity = id;
-        s.price = calculatePrice(s.product, id);
-        s.step = "ADDRESS_OPTION";
-        return sendAddressOption(from);
-
-      // ---------- ADDRESS OPTION ----------
-      case "ADDRESS_OPTION":
-        if (id === "TYPE") {
-          s.step = "ADDRESS_TEXT";
-          return sendText(from, "✍️ Please type your full address");
-        }
-        if (id === "LOCATION") {
-          s.address = "Live Location Shared";
-          s.step = "DELIVERY_SLOT";
-          return sendDeliverySlot(from);
-        }
-        break;
-
-      // ---------- DELIVERY SLOT ----------
-      case "DELIVERY_SLOT":
-        s.slot = id;
-        s.step = "TIME";
-        return sendText(from, "🕒 Enter delivery time (example: 6:30 AM)");
-
-      // ---------- CONFIRM ----------
-      case "CONFIRM":
-        if (id === "CONFIRM") {
-          await sendText(from,
-`✅ *Order Confirmed!*
-
-🙏 Thank you for ordering from
-*Bala Milk Store* 🥛`);
-          delete sessions[from];
-        } else {
-          await sendText(from, "❌ Order Cancelled");
-          delete sessions[from];
-        }
-        break;
-    }
-  }
-
-  // ---------- TEXT INPUT ----------
-  if (type === "text") {
-    const text = msg.text.body;
-
-    if (s.step === "ADDRESS_TEXT") {
-      s.address = text;
-      s.step = "DELIVERY_SLOT";
-      return sendDeliverySlot(from);
-    }
-
-    if (s.step === "TIME") {
-      s.time = text;
-      s.step = "CONFIRM";
-      return sendOrderSummary(from, s);
-    }
-  }
-
-  res.sendStatus(200);
+/* ---------------- HEALTH CHECK ---------------- */
+app.get("/", (req, res) => {
+  res.send("WhatsApp Bot is Running ✅");
 });
 
-// ---------- SEND FUNCTIONS ----------
+/* ---------------- WEBHOOK VERIFY ---------------- */
+app.get("/webhook", (req, res) => {
+  const VERIFY_TOKEN = "mytoken123";
 
-async function sendMainMenu(to) {
-  await sendButtons(
-    to,
-    "🥛 *Welcome to Bala Milk Store*\nChoose a product:",
-    [
-      { id: "buffalo", title: "Buffalo Milk ₹100/L" },
-      { id: "cow", title: "Cow Milk ₹120/L" },
-      { id: "paneer", title: "Paneer ₹600/Kg" }
-    ]
-  );
-}
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
 
-async function sendQuantityMenu(to, product) {
-  let buttons = [];
-
-  if (product.type === "MILK") {
-    buttons = [
-      { id: "500ml", title: "500ml ₹" + product.price / 2 },
-      { id: "1L", title: "1L ₹" + product.price },
-      { id: "2L", title: "2L ₹" + product.price * 2 }
-    ];
+  if (mode === "subscribe" && token === VERIFY_TOKEN) {
+    console.log("✅ Webhook verified");
+    res.status(200).send(challenge);
   } else {
-    buttons = [
-      { id: "250g", title: "250g ₹" + product.price / 4 },
-      { id: "500g", title: "500g ₹" + product.price / 2 },
-      { id: "1kg", title: "1Kg ₹" + product.price }
-    ];
+    res.sendStatus(403);
   }
+});
 
-  buttons.push({ id: "BACK", title: "⬅ Back" });
+/* ---------------- WEBHOOK RECEIVE ---------------- */
+app.post("/webhook", async (req, res) => {
+  try {
+    const entry = req.body.entry?.[0];
+    const changes = entry?.changes?.[0];
+    const value = changes?.value;
 
-  await sendButtons(to, `🛒 *${product.name}*\nSelect quantity:`, buttons);
+    if (!value?.messages) {
+      return res.sendStatus(200);
+    }
+
+    const message = value.messages[0];
+    const from = message.from;
+
+    console.log("📩 Incoming:", JSON.stringify(message, null, 2));
+
+    // TEXT MESSAGE
+    if (message.type === "text") {
+      const text = message.text.body.toLowerCase();
+
+      if (text === "hi" || text === "hello") {
+        await sendMainMenu(from);
+      } else {
+        await sendText(from, "Please use menu buttons ⬇️");
+      }
+    }
+
+    // BUTTON REPLY
+    if (message.type === "interactive") {
+      const id = message.interactive.button_reply.id;
+      await handleButton(from, id);
+    }
+
+    res.sendStatus(200);
+  } catch (err) {
+    console.error("❌ Webhook Error:", err.response?.data || err.message);
+    res.sendStatus(200);
+  }
+});
+
+/* ---------------- BUTTON HANDLER ---------------- */
+async function handleButton(to, id) {
+  switch (id) {
+    case "BUFFALO":
+      await sendText(to, "🐃 Buffalo Milk\n₹100 / L");
+      break;
+
+    case "COW":
+      await sendText(to, "🐄 Cow Milk\n₹120 / L");
+      break;
+
+    case "PANEER":
+      await sendText(to, "🧀 Paneer\n₹600 / Kg");
+      break;
+
+    case "GHEE":
+      await sendText(to, "🧈 Ghee\n₹1000 / Kg");
+      break;
+
+    case "SUBSCRIPTION":
+      await sendText(to, "📆 Daily Milk Subscription\nOwner will contact you");
+      break;
+
+    case "OWNER":
+      await sendText(to, "📞 Owner Contact: +91XXXXXXXXXX");
+      break;
+
+    default:
+      await sendText(to, "Please choose from menu ⬇️");
+  }
 }
 
-async function sendAddressOption(to) {
-  await sendButtons(
-    to,
-    "📍 Choose delivery address option:",
-    [
-      { id: "TYPE", title: "✍️ Type Address" },
-      { id: "LOCATION", title: "📍 Share Live Location" },
-      { id: "BACK", title: "⬅ Back" }
-    ]
-  );
-}
-
-async function sendDeliverySlot(to) {
-  await sendButtons(
-    to,
-    "⏰ Select delivery slot:",
-    [
-      { id: "Morning", title: "🌅 Morning" },
-      { id: "Evening", title: "🌙 Evening" },
-      { id: "BACK", title: "⬅ Back" }
-    ]
-  );
-}
-
-async function sendOrderSummary(to, s) {
-  await sendButtons(
-    to,
-`🧾 *Order Summary*
-
-🥛 Product: ${s.product.name}
-📦 Quantity: ${s.quantity}
-💰 Price: ₹${s.price}
-📍 Address: ${s.address}
-⏰ Slot: ${s.slot}
-🕒 Time: ${s.time}
-
-Confirm order?`,
-    [
-      { id: "CONFIRM", title: "✅ Confirm" },
-      { id: "CANCEL", title: "❌ Cancel" }
-    ]
-  );
-}
-
-// ---------- UTIL ----------
-function calculatePrice(product, qty) {
-  const map = {
-    "500ml": 0.5, "1L": 1, "2L": 2,
-    "250g": 0.25, "500g": 0.5, "1kg": 1
-  };
-  return product.price * map[qty];
-}
-
-async function sendButtons(to, body, buttons) {
+/* ---------------- MAIN MENU ---------------- */
+async function sendMainMenu(to) {
   await axios.post(
     `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
     {
@@ -209,12 +111,42 @@ async function sendButtons(to, body, buttons) {
       type: "interactive",
       interactive: {
         type: "button",
-        body: { text: body },
+        body: {
+          text: "🥛 *Welcome to Bala Milk Store*\n\nPlease choose an option:"
+        },
         action: {
-          buttons: buttons.map(b => ({
-            type: "reply",
-            reply: { id: b.id, title: b.title }
-          }))
+          buttons: [
+            { type: "reply", reply: { id: "BUFFALO", title: "🐃 Buffalo Milk" } },
+            { type: "reply", reply: { id: "COW", title: "🐄 Cow Milk" } },
+            { type: "reply", reply: { id: "PANEER", title: "🧀 Paneer" } }
+          ]
+        }
+      }
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        "Content-Type": "application/json"
+      }
+    }
+  );
+
+  // second row (WhatsApp allows only 3 buttons per message)
+  await axios.post(
+    `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
+    {
+      messaging_product: "whatsapp",
+      to,
+      type: "interactive",
+      interactive: {
+        type: "button",
+        body: { text: "More options ⬇️" },
+        action: {
+          buttons: [
+            { type: "reply", reply: { id: "GHEE", title: "🧈 Ghee" } },
+            { type: "reply", reply: { id: "SUBSCRIPTION", title: "📆 Subscription" } },
+            { type: "reply", reply: { id: "OWNER", title: "📞 Talk to Owner" } }
+          ]
         }
       }
     },
@@ -227,13 +159,14 @@ async function sendButtons(to, body, buttons) {
   );
 }
 
-async function sendText(to, body) {
+/* ---------------- TEXT MESSAGE ---------------- */
+async function sendText(to, text) {
   await axios.post(
     `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
     {
       messaging_product: "whatsapp",
       to,
-      text: { body }
+      text: { body: text }
     },
     {
       headers: {
@@ -244,4 +177,7 @@ async function sendText(to, body) {
   );
 }
 
-app.listen(PORT, () => console.log("✅ WhatsApp Bot Running"));
+/* ---------------- START SERVER ---------------- */
+app.listen(PORT, () => {
+  console.log("🚀 Server running on port", PORT);
+});

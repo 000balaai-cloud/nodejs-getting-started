@@ -86,7 +86,7 @@ async function quantityMenu(to, product) {
     ],
     GHEE: [
       { id: "250g|250", title: "250 g", description: "₹250" },
-      { id: "500g|500", title: "₹500", description: "₹500" },
+      { id: "500g|500", title: "500 g", description: "₹500" },
     ],
   };
 
@@ -99,10 +99,7 @@ async function quantityMenu(to, product) {
       body: { text: "Select quantity" },
       action: {
         button: "Quantity",
-        sections: [
-          { title: "Options", rows: map[product] },
-          { title: "Navigation", rows: [{ id: "BACK_MENU", title: "⬅ Back" }] },
-        ],
+        sections: [{ title: "Options", rows: map[product] }],
       },
     },
   });
@@ -162,6 +159,7 @@ async function timeMenu(to) {
 
 async function orderSummary(to) {
   const s = sessions[to];
+  s.step = "CONFIRM";
 
   await send({
     messaging_product: "whatsapp",
@@ -203,51 +201,9 @@ app.post("/webhook", async (req, res) => {
       msg.interactive?.list_reply?.id ||
       msg.interactive?.button_reply?.id;
 
-    // New user
-    if (!sessions[from]) {
-      await mainMenu(from);
-      return res.sendStatus(200);
-    }
-
-    const s = sessions[from];
-
-    /* ===== MENU ===== */
-    if (s.step === "MENU") {
-      return quantityMenu(from, replyId);
-    }
-
-    /* ===== QTY ===== */
-    if (s.step === "QTY") {
-      if (replyId === "BACK_MENU") return mainMenu(from);
-
-      const [qty, price] = replyId.split("|");
-      s.quantity = qty;
-      s.price = price;
-
-      return addressMenu(from);
-    }
-
-    /* ===== ADDRESS ===== */
-    if (s.step === "ADDRESS") {
-      if (replyId === "LIVE") {
-        s.address = "Live Location";
-      } else {
-        s.address = "Typed Address";
-      }
-      return timeMenu(from);
-    }
-
-    /* ===== TIME ===== */
-    if (s.step === "TIME") {
-      s.time = replyId;
-      return orderSummary(from);
-    }
-
-    /* ===== CONFIRM ===== */
-    if (replyId === "CONFIRM") {
-      // 🔒 STOP DUPLICATE CONFIRM
-      if (s.confirmed) return res.sendStatus(200);
-      s.confirmed = true;
+    /* 🔴 HANDLE CONFIRM FIRST */
+    if (replyId === "CONFIRM" && sessions[from]) {
+      const s = sessions[from];
 
       const orderId = "ORD" + Date.now();
 
@@ -266,9 +222,35 @@ app.post("/webhook", async (req, res) => {
         `🙏 *Thank you for ordering from Bala Milk Store*\n\n🆔 Order ID: ${orderId}\nWe will contact you shortly.`
       );
 
-      // 🔥 END SESSION (NO MENU AFTER THIS)
-      delete sessions[from];
+      delete sessions[from]; // 🔥 END SESSION
       return res.sendStatus(200);
+    }
+
+    /* NEW USER */
+    if (!sessions[from]) {
+      await mainMenu(from);
+      return res.sendStatus(200);
+    }
+
+    const s = sessions[from];
+
+    if (s.step === "MENU") return quantityMenu(from, replyId);
+
+    if (s.step === "QTY") {
+      const [qty, price] = replyId.split("|");
+      s.quantity = qty;
+      s.price = price;
+      return addressMenu(from);
+    }
+
+    if (s.step === "ADDRESS") {
+      s.address = replyId === "LIVE" ? "Live Location" : "Typed Address";
+      return timeMenu(from);
+    }
+
+    if (s.step === "TIME") {
+      s.time = replyId;
+      return orderSummary(from);
     }
 
     res.sendStatus(200);
@@ -286,8 +268,6 @@ app.get("/webhook", (req, res) => {
   }
   res.sendStatus(403);
 });
-
-/* ================= START ================= */
 
 app.listen(PORT, () => {
   console.log("Server running on port", PORT);

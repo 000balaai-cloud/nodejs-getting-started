@@ -4,7 +4,7 @@ import axios from "axios";
 const app = express();
 app.use(express.json());
 
-/* ================== CONFIG ================== */
+/* ================= CONFIG ================= */
 
 const WA_URL = `https://graph.facebook.com/v18.0/${process.env.PHONE_NUMBER_ID}/messages`;
 const TOKEN = process.env.WHATSAPP_TOKEN;
@@ -12,7 +12,7 @@ const SHEET_URL = process.env.GOOGLE_SHEET_URL;
 
 const sessions = {};
 
-/* ================== HELPERS ================== */
+/* ================= HELPERS ================= */
 
 async function send(payload) {
   await axios.post(WA_URL, payload, {
@@ -26,7 +26,7 @@ async function send(payload) {
 const sendText = (to, body) =>
   send({ messaging_product: "whatsapp", to, text: { body } });
 
-/* ================== MENUS ================== */
+/* ================= MENUS ================= */
 
 async function mainMenu(to) {
   sessions[to] = { step: "MENU" };
@@ -58,10 +58,11 @@ async function mainMenu(to) {
 }
 
 async function quantityMenu(to, product) {
-  sessions[to].step = "QTY";
-  sessions[to].product = product;
+  const s = sessions[to];
+  s.step = "QTY";
+  s.product = product;
 
-  const options = {
+  const map = {
     BUFFALO: [
       { id: "500ml|50", title: "500 ml", description: "₹50" },
       { id: "1L|100", title: "1 Liter", description: "₹100" },
@@ -90,7 +91,7 @@ async function quantityMenu(to, product) {
       action: {
         button: "Quantity",
         sections: [
-          { title: "Options", rows: options[product] },
+          { title: "Options", rows: map[product] },
           { title: "Navigation", rows: [{ id: "BACK_MENU", title: "⬅ Back" }] },
         ],
       },
@@ -150,8 +151,9 @@ async function timeMenu(to) {
   });
 }
 
-async function orderSummary(to) {
+async function summary(to) {
   const s = sessions[to];
+  s.step = "CONFIRMING";
 
   await send({
     messaging_product: "whatsapp",
@@ -177,28 +179,25 @@ async function orderSummary(to) {
   });
 }
 
-/* ================== WEBHOOK ================== */
+/* ================= WEBHOOK ================= */
 
 app.post("/webhook", async (req, res) => {
   try {
-    const msg =
-      req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    const msg = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
     if (!msg) return res.sendStatus(200);
 
     const from = msg.from;
-    const msgType = msg.type;
-
-    /* 🚫 IGNORE NON-USER EVENTS (THIS FIXES YOUR ISSUE) */
-    if (!["interactive", "text", "location"].includes(msgType)) {
-      return res.sendStatus(200);
-    }
-
     const replyId =
       msg.interactive?.list_reply?.id ||
       msg.interactive?.button_reply?.id;
 
-    /* 🔹 Start menu ONLY when user types */
-    if (!sessions[from] && msgType === "text") {
+    /* 🚫 Ignore all events if order already completed */
+    if (sessions[from]?.step === "COMPLETED") {
+      return res.sendStatus(200);
+    }
+
+    /* Start menu only on first text */
+    if (!sessions[from] && msg.type === "text") {
       await mainMenu(from);
       return res.sendStatus(200);
     }
@@ -211,32 +210,28 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    if (s.step === "MENU") {
-      await quantityMenu(from, replyId);
-      return res.sendStatus(200);
-    }
+    if (s.step === "MENU") return quantityMenu(from, replyId);
 
     if (s.step === "QTY") {
       const [q, p] = replyId.split("|");
       s.quantity = q;
       s.price = p;
-      await addressMenu(from);
-      return res.sendStatus(200);
+      return addressMenu(from);
     }
 
     if (s.step === "ADDRESS") {
       s.address = replyId === "LIVE" ? "Live Location" : "Typed Address";
-      await timeMenu(from);
-      return res.sendStatus(200);
+      return timeMenu(from);
     }
 
     if (s.step === "TIME") {
       s.time = replyId;
-      await orderSummary(from);
-      return res.sendStatus(200);
+      return summary(from);
     }
 
-    if (replyId === "CONFIRM") {
+    if (replyId === "CONFIRM" && s.step === "CONFIRMING") {
+      s.step = "COMPLETED"; // 🔥 CRITICAL FIX
+
       const orderId = "ORD" + Date.now();
 
       await axios.post(SHEET_URL, {
@@ -254,20 +249,17 @@ app.post("/webhook", async (req, res) => {
         `🙏 *Thank you for ordering from Bala Milk Store*\n\n🆔 Order ID: ${orderId}\nWe will contact you shortly.`
       );
 
-      /* 🔥 VERY IMPORTANT: CLEAR SESSION */
-      delete sessions[from];
-
       return res.sendStatus(200);
     }
 
     res.sendStatus(200);
   } catch (err) {
-    console.error(err.response?.data || err.message);
+    console.error(err);
     res.sendStatus(200);
   }
 });
 
-/* ================== VERIFY ================== */
+/* ================= VERIFY ================= */
 
 app.get("/webhook", (req, res) => {
   if (req.query["hub.verify_token"] === process.env.VERIFY_TOKEN) {

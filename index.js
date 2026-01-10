@@ -5,57 +5,45 @@ import bodyParser from "body-parser";
 const app = express();
 app.use(bodyParser.json());
 
-/* ================== CONFIG ================== */
+/* ================= CONFIG ================= */
 const TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
-/* ================== SESSION ================== */
+/* ================= SESSION STORE ================= */
 const sessions = {};
 
-/* ================== WEBHOOK VERIFY ================== */
+/* ================= WEBHOOK VERIFY ================= */
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
-
   if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    console.log("Webhook verified");
     return res.status(200).send(challenge);
   }
   res.sendStatus(403);
 });
 
-/* ================== WEBHOOK RECEIVE ================== */
+/* ================= WEBHOOK RECEIVE ================= */
 app.post("/webhook", async (req, res) => {
   try {
-    const entry = req.body.entry?.[0];
-    const change = entry?.changes?.[0];
-    const msg = change?.value?.messages?.[0];
+    const msg = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
     if (!msg) return res.sendStatus(200);
 
     const from = msg.from;
-    const text = msg.text?.body;
-    const replyId = msg.button?.payload;
+    const replyId =
+      msg.interactive?.list_reply?.id ||
+      msg.interactive?.button_reply?.id;
 
     if (!sessions[from]) {
-      sessions[from] = {
-        step: "MENU",
-        product: null,
-        price: 0,
-        qty: null,
-        total: 0,
-        address: null,
-        location: null,
-        deliveryTime: null
-      };
-      await sendMenu(from);
+      sessions[from] = { step: "MENU" };
+      await sendMainMenu(from);
       return res.sendStatus(200);
     }
 
     const s = sessions[from];
 
-    /* -------- LOCATION HANDLING -------- */
+    /* ===== LOCATION ===== */
     if (msg.location && s.step === "LOCATION") {
       s.location = msg.location;
       s.step = "DELIVERY_TIME";
@@ -63,58 +51,58 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    /* -------- BACK BUTTON -------- */
+    /* ===== BACK ===== */
     if (replyId === "BACK") {
       s.step = "MENU";
-      await sendMenu(from);
+      await sendMainMenu(from);
       return res.sendStatus(200);
     }
 
+    /* ===== FLOW ===== */
     switch (s.step) {
       case "MENU":
-        handleMenu(replyId, s);
-        await sendQuantity(from, s);
+        selectProduct(replyId, s);
+        if (!s.product) {
+          await sendMainMenu(from);
+          break;
+        }
         s.step = "QTY";
+        await sendQuantity(from, s);
         break;
 
       case "QTY":
-        handleQty(replyId, s);
+        selectQuantity(replyId, s);
         if (!s.qty) {
           await sendQuantity(from, s);
           break;
         }
         s.step = "ADDRESS";
-        await sendText(from, "🏠 *Please enter your delivery address:*");
+        await sendText(from, "🏠 Please type your delivery address");
         break;
 
       case "ADDRESS":
-        if (!text) {
-          await sendText(from, "❌ Please type your address.");
+        s.address = msg.text?.body;
+        if (!s.address) {
+          await sendText(from, "❌ Please type address");
           break;
         }
-        s.address = text;
         s.step = "LOCATION";
-        await sendText(from, "📍 *Please share your live location using WhatsApp location option*");
+        await sendText(from, "📍 Please share your live location");
         break;
 
       case "DELIVERY_TIME":
-        const times = {
-          MORNING: "Morning (6–9 AM)",
-          EVENING: "Evening (5–8 PM)",
-          CUSTOM: "Custom Time"
-        };
-        if (!times[replyId]) {
+        s.deliveryTime = replyId;
+        if (!s.deliveryTime) {
           await sendDeliveryTime(from);
           break;
         }
-        s.deliveryTime = times[replyId];
         s.step = "CONFIRM";
         await sendConfirm(from, s);
         break;
 
       case "CONFIRM":
         if (replyId === "CONFIRM") {
-          await sendText(from, "✅ *Order confirmed!* 🥛\nThank you for ordering from Bala Milk Store.");
+          await sendText(from, "✅ Order confirmed 🥛");
           delete sessions[from];
         }
         break;
@@ -122,18 +110,20 @@ app.post("/webhook", async (req, res) => {
 
     res.sendStatus(200);
   } catch (e) {
-    console.error("Webhook Error:", e.response?.data || e);
+    console.error(e.response?.data || e);
     res.sendStatus(200);
   }
 });
 
-/* ================== HANDLERS ================== */
-function handleMenu(id, s) {
+/* ================= HELPERS ================= */
+function selectProduct(id, s) {
   const map = {
     BUFFALO: ["Buffalo Milk", 100],
     COW: ["Cow Milk", 120],
     PANEER: ["Paneer", 600],
-    GHEE: ["Ghee", 1000]
+    GHEE: ["Ghee", 1000],
+    SUB: ["Daily Subscription", 0],
+    OWNER: ["Talk to Owner", 0]
   };
   if (map[id]) {
     s.product = map[id][0];
@@ -141,38 +131,56 @@ function handleMenu(id, s) {
   }
 }
 
-function handleQty(id, s) {
+function selectQuantity(id, s) {
   const map = {
-    Q500: [0.5, s.price * 0.5],
-    Q1: [1, s.price],
-    Q2: [2, s.price * 2]
+    Q500: ["500 ml", s.price * 0.5],
+    Q1: ["1 L", s.price],
+    Q2: ["2 L", s.price * 2]
   };
   if (map[id]) {
-    s.qty = map[id][0] + " L";
+    s.qty = map[id][0];
     s.total = map[id][1];
   }
 }
 
-/* ================== SENDERS ================== */
-async function sendMenu(to) {
-  await sendButtons(
-    to,
-    `🥛 *Welcome to Bala Milk Store*\n\nChoose an option:`,
-    [
-      { id: "BUFFALO", title: "Buffalo Milk" },
-      { id: "COW", title: "Cow Milk" },
-      { id: "PANEER", title: "Paneer / Ghee" }
-    ]
+/* ================= SENDERS ================= */
+async function sendMainMenu(to) {
+  await axios.post(
+    `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
+    {
+      messaging_product: "whatsapp",
+      to,
+      type: "interactive",
+      interactive: {
+        type: "list",
+        body: { text: "🥛 *Bala Milk Store*\nChoose an option" },
+        action: {
+          button: "View Menu",
+          sections: [
+            {
+              title: "Products",
+              rows: [
+                { id: "BUFFALO", title: "Buffalo Milk – ₹100/L" },
+                { id: "COW", title: "Cow Milk – ₹120/L" },
+                { id: "PANEER", title: "Paneer – ₹600/Kg" },
+                { id: "GHEE", title: "Ghee – ₹1000/Kg" },
+                { id: "SUB", title: "Daily Milk Subscription" },
+                { id: "OWNER", title: "Talk to Owner" }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    { headers: { Authorization: `Bearer ${TOKEN}` } }
   );
 }
 
 async function sendQuantity(to, s) {
   await sendButtons(
     to,
-    `🧾 *${s.product}*\n\nChoose quantity:\n\n` +
-    `500 ml – ₹${s.price * 0.5}\n` +
-    `1 L – ₹${s.price}\n` +
-    `2 L – ₹${s.price * 2}`,
+    `🛒 ${s.product}\nChoose quantity\n\n` +
+      `500 ml – ₹${s.price * 0.5}\n1 L – ₹${s.price}\n2 L – ₹${s.price * 2}`,
     [
       { id: "Q500", title: "500 ml" },
       { id: "Q1", title: "1 L" },
@@ -184,11 +192,11 @@ async function sendQuantity(to, s) {
 async function sendDeliveryTime(to) {
   await sendButtons(
     to,
-    "⏰ *Select Delivery Time*",
+    "⏰ Choose delivery time",
     [
-      { id: "MORNING", title: "Morning (6–9 AM)" },
-      { id: "EVENING", title: "Evening (5–8 PM)" },
-      { id: "CUSTOM", title: "Custom Time" }
+      { id: "Morning", title: "Morning" },
+      { id: "Evening", title: "Evening" },
+      { id: "BACK", title: "⬅ Back" }
     ]
   );
 }
@@ -196,16 +204,33 @@ async function sendDeliveryTime(to) {
 async function sendConfirm(to, s) {
   await sendButtons(
     to,
-    `🧾 *Confirm Order*\n\n` +
-    `🛒 ${s.product}\n` +
-    `📦 ${s.qty}\n` +
-    `💰 ₹${s.total}\n\n` +
-    `🏠 ${s.address}\n` +
-    `⏰ ${s.deliveryTime}`,
+    `🧾 Confirm Order\n\n${s.product}\n${s.qty}\n₹${s.total}\n${s.address}`,
     [
       { id: "CONFIRM", title: "Confirm ✅" },
       { id: "BACK", title: "⬅ Back" }
     ]
+  );
+}
+
+async function sendButtons(to, body, buttons) {
+  await axios.post(
+    `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
+    {
+      messaging_product: "whatsapp",
+      to,
+      type: "interactive",
+      interactive: {
+        type: "button",
+        body: { text: body },
+        action: {
+          buttons: buttons.map(b => ({
+            type: "reply",
+            reply: { id: b.id, title: b.title }
+          }))
+        }
+      }
+    },
+    { headers: { Authorization: `Bearer ${TOKEN}` } }
   );
 }
 
@@ -222,28 +247,5 @@ async function sendText(to, body) {
   );
 }
 
-async function sendButtons(to, body, buttons) {
-  await axios.post(
-    `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
-    {
-      messaging_product: "whatsapp",
-      to,
-      type: "interactive",
-      interactive: {
-        type: "button",
-        body: { text: body },
-        action: {
-          buttons: buttons.slice(0, 3).map(b => ({
-            type: "reply",
-            reply: { id: b.id, title: b.title }
-          }))
-        }
-      }
-    },
-    { headers: { Authorization: `Bearer ${TOKEN}` } }
-  );
-}
-
-/* ================== START SERVER ================== */
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log("Server running on port", PORT));
+/* ================= START ================= */
+app.listen(10000, () => console.log("Server running"));

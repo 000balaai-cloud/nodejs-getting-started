@@ -5,196 +5,231 @@ const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-const WHATSAPP_API_URL = process.env.WHATSAPP_API_URL;
 const TOKEN = process.env.WHATSAPP_TOKEN;
+const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
 let sessions = {};
 
+// ---------- PRODUCTS ----------
 const PRODUCTS = {
-  "1": { name: "Buffalo Milk", price: 100 },
-  "2": { name: "Cow Milk", price: 120 },
-  "3": { name: "Paneer", price: 600 },
-  "4": { name: "Ghee", price: 1000 },
+  buffalo: { name: "Buffalo Milk", price: 100, type: "MILK" },
+  cow: { name: "Cow Milk", price: 120, type: "MILK" },
+  paneer: { name: "Paneer", price: 600, type: "PANEER" },
+  ghee: { name: "Ghee", price: 1000, type: "GHEE" }
 };
 
-// ---------------- WEBHOOK ----------------
+// ---------- WEBHOOK ----------
 app.post("/webhook", async (req, res) => {
-  const msg = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+  const entry = req.body.entry?.[0]?.changes?.[0]?.value;
+  const msg = entry?.messages?.[0];
   if (!msg) return res.sendStatus(200);
 
   const from = msg.from;
-  const text = msg.text?.body?.trim();
+  const type = msg.type;
 
-  if (!sessions[from]) {
-    sessions[from] = { step: "MENU", phone: from };
-  }
-
+  if (!sessions[from]) sessions[from] = { step: "MENU" };
   const s = sessions[from];
 
-  // BACK
-  if (text === "0") s.step = "MENU";
+  // ---------- BUTTON CLICK ----------
+  if (type === "interactive") {
+    const id = msg.interactive.button_reply.id;
 
-  switch (s.step) {
+    // BACK BUTTON
+    if (id === "BACK") {
+      s.step = "MENU";
+      return sendMainMenu(from);
+    }
 
-    // ---------------- MENU ----------------
-    case "MENU":
-      s.step = "PRODUCT";
-      await sendText(from,
-`🥛 *Welcome to Bala Milk Store*
+    switch (s.step) {
 
-1️⃣ Buffalo Milk – ₹100/L
-2️⃣ Cow Milk – ₹120/L
-3️⃣ Paneer – ₹600/Kg
-4️⃣ Ghee – ₹1000/Kg
-5️⃣ Daily Milk Subscription
-6️⃣ Talk to Owner
+      // ---------- PRODUCT ----------
+      case "MENU":
+        s.product = PRODUCTS[id];
+        s.step = "QUANTITY";
+        return sendQuantityMenu(from, s.product);
 
-Reply with option number`);
-      break;
+      // ---------- QUANTITY ----------
+      case "QUANTITY":
+        s.quantity = id;
+        s.price = calculatePrice(s.product, id);
+        s.step = "ADDRESS_OPTION";
+        return sendAddressOption(from);
 
-    // ---------------- PRODUCT ----------------
-    case "PRODUCT":
-      if (!PRODUCTS[text]) {
-        await sendText(from, "❌ Invalid option\n0️⃣ Back");
+      // ---------- ADDRESS OPTION ----------
+      case "ADDRESS_OPTION":
+        if (id === "TYPE") {
+          s.step = "ADDRESS_TEXT";
+          return sendText(from, "✍️ Please type your full address");
+        }
+        if (id === "LOCATION") {
+          s.address = "Live Location Shared";
+          s.step = "DELIVERY_SLOT";
+          return sendDeliverySlot(from);
+        }
         break;
-      }
 
-      s.product = PRODUCTS[text];
-      s.step = "QUANTITY";
+      // ---------- DELIVERY SLOT ----------
+      case "DELIVERY_SLOT":
+        s.slot = id;
+        s.step = "TIME";
+        return sendText(from, "🕒 Enter delivery time (example: 6:30 AM)");
 
-      await sendText(from,
-`🛒 *${s.product.name}*
-Price: ₹${s.product.price} per unit
-
-Select Quantity:
-1️⃣ 500ml / 0.5 Kg – ₹${s.product.price / 2}
-2️⃣ 1 Unit – ₹${s.product.price}
-3️⃣ 2 Units – ₹${s.product.price * 2}
-
-0️⃣ Back`);
-      break;
-
-    // ---------------- QUANTITY ----------------
-    case "QUANTITY":
-      const qtyMap = {
-        "1": { label: "0.5", mul: 0.5 },
-        "2": { label: "1", mul: 1 },
-        "3": { label: "2", mul: 2 },
-      };
-
-      if (!qtyMap[text]) {
-        await sendText(from, "❌ Choose valid quantity\n0️⃣ Back");
-        break;
-      }
-
-      s.quantity = qtyMap[text].label;
-      s.total = s.product.price * qtyMap[text].mul;
-      s.step = "ADDRESS_OPTION";
-
-      await sendText(from,
-`📍 *Delivery Address*
-Choose one option:
-
-1️⃣ Type Address
-2️⃣ Share Live Location
-
-0️⃣ Back`);
-      break;
-
-    // ---------------- ADDRESS OPTION ----------------
-    case "ADDRESS_OPTION":
-      if (text === "1") {
-        s.step = "ADDRESS_TEXT";
-        await sendText(from, "✍️ Please type your full address\n0️⃣ Back");
-      } else if (text === "2") {
-        s.step = "LOCATION";
-        await sendText(from, "📍 Please share your live location");
-      } else {
-        await sendText(from, "❌ Invalid option\n0️⃣ Back");
-      }
-      break;
-
-    case "ADDRESS_TEXT":
-      s.address = text;
-      s.step = "DELIVERY";
-      await sendText(from,
-`⏰ Select Delivery Slot:
-1️⃣ Morning
-2️⃣ Evening
-
-0️⃣ Back`);
-      break;
-
-    case "LOCATION":
-      s.address = "Live Location Shared";
-      s.step = "DELIVERY";
-      await sendText(from,
-`⏰ Select Delivery Slot:
-1️⃣ Morning
-2️⃣ Evening
-
-0️⃣ Back`);
-      break;
-
-    // ---------------- DELIVERY ----------------
-    case "DELIVERY":
-      if (text === "1") s.slot = "Morning";
-      else if (text === "2") s.slot = "Evening";
-      else {
-        await sendText(from, "❌ Invalid option\n0️⃣ Back");
-        break;
-      }
-
-      s.step = "TIME";
-      await sendText(from, "🕒 Enter delivery time (example: 6:30 AM)\n0️⃣ Back");
-      break;
-
-    // ---------------- TIME ----------------
-    case "TIME":
-      s.time = text;
-      s.step = "CONFIRM";
-
-      await sendText(from,
-`🧾 *ORDER SUMMARY*
-
-━━━━━━━━━━━━━━
-🥛 Product : ${s.product.name}
-📦 Quantity : ${s.quantity}
-💰 Price    : ₹${s.total}
-📍 Address  : ${s.address}
-⏰ Delivery : ${s.slot} – ${s.time}
-━━━━━━━━━━━━━━
-
-1️⃣ Confirm Order
-2️⃣ Cancel Order
-0️⃣ Back`);
-      break;
-
-    // ---------------- CONFIRM ----------------
-    case "CONFIRM":
-      if (text === "1") {
-        await sendText(from,
+      // ---------- CONFIRM ----------
+      case "CONFIRM":
+        if (id === "CONFIRM") {
+          await sendText(from,
 `✅ *Order Confirmed!*
 
 🙏 Thank you for ordering from
-*Bala Milk Store* 🥛
+*Bala Milk Store* 🥛`);
+          delete sessions[from];
+        } else {
+          await sendText(from, "❌ Order Cancelled");
+          delete sessions[from];
+        }
+        break;
+    }
+  }
 
-We will contact you shortly.`);
-        delete sessions[from];
-      } else {
-        await sendText(from, "❌ Order Cancelled");
-        delete sessions[from];
-      }
-      break;
+  // ---------- TEXT INPUT ----------
+  if (type === "text") {
+    const text = msg.text.body;
+
+    if (s.step === "ADDRESS_TEXT") {
+      s.address = text;
+      s.step = "DELIVERY_SLOT";
+      return sendDeliverySlot(from);
+    }
+
+    if (s.step === "TIME") {
+      s.time = text;
+      s.step = "CONFIRM";
+      return sendOrderSummary(from, s);
+    }
   }
 
   res.sendStatus(200);
 });
 
-// ---------------- SEND MESSAGE ----------------
+// ---------- SEND FUNCTIONS ----------
+
+async function sendMainMenu(to) {
+  await sendButtons(
+    to,
+    "🥛 *Welcome to Bala Milk Store*\nChoose a product:",
+    [
+      { id: "buffalo", title: "Buffalo Milk ₹100/L" },
+      { id: "cow", title: "Cow Milk ₹120/L" },
+      { id: "paneer", title: "Paneer ₹600/Kg" }
+    ]
+  );
+}
+
+async function sendQuantityMenu(to, product) {
+  let buttons = [];
+
+  if (product.type === "MILK") {
+    buttons = [
+      { id: "500ml", title: "500ml ₹" + product.price / 2 },
+      { id: "1L", title: "1L ₹" + product.price },
+      { id: "2L", title: "2L ₹" + product.price * 2 }
+    ];
+  } else {
+    buttons = [
+      { id: "250g", title: "250g ₹" + product.price / 4 },
+      { id: "500g", title: "500g ₹" + product.price / 2 },
+      { id: "1kg", title: "1Kg ₹" + product.price }
+    ];
+  }
+
+  buttons.push({ id: "BACK", title: "⬅ Back" });
+
+  await sendButtons(to, `🛒 *${product.name}*\nSelect quantity:`, buttons);
+}
+
+async function sendAddressOption(to) {
+  await sendButtons(
+    to,
+    "📍 Choose delivery address option:",
+    [
+      { id: "TYPE", title: "✍️ Type Address" },
+      { id: "LOCATION", title: "📍 Share Live Location" },
+      { id: "BACK", title: "⬅ Back" }
+    ]
+  );
+}
+
+async function sendDeliverySlot(to) {
+  await sendButtons(
+    to,
+    "⏰ Select delivery slot:",
+    [
+      { id: "Morning", title: "🌅 Morning" },
+      { id: "Evening", title: "🌙 Evening" },
+      { id: "BACK", title: "⬅ Back" }
+    ]
+  );
+}
+
+async function sendOrderSummary(to, s) {
+  await sendButtons(
+    to,
+`🧾 *Order Summary*
+
+🥛 Product: ${s.product.name}
+📦 Quantity: ${s.quantity}
+💰 Price: ₹${s.price}
+📍 Address: ${s.address}
+⏰ Slot: ${s.slot}
+🕒 Time: ${s.time}
+
+Confirm order?`,
+    [
+      { id: "CONFIRM", title: "✅ Confirm" },
+      { id: "CANCEL", title: "❌ Cancel" }
+    ]
+  );
+}
+
+// ---------- UTIL ----------
+function calculatePrice(product, qty) {
+  const map = {
+    "500ml": 0.5, "1L": 1, "2L": 2,
+    "250g": 0.25, "500g": 0.5, "1kg": 1
+  };
+  return product.price * map[qty];
+}
+
+async function sendButtons(to, body, buttons) {
+  await axios.post(
+    `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
+    {
+      messaging_product: "whatsapp",
+      to,
+      type: "interactive",
+      interactive: {
+        type: "button",
+        body: { text: body },
+        action: {
+          buttons: buttons.map(b => ({
+            type: "reply",
+            reply: { id: b.id, title: b.title }
+          }))
+        }
+      }
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        "Content-Type": "application/json"
+      }
+    }
+  );
+}
+
 async function sendText(to, body) {
   await axios.post(
-    WHATSAPP_API_URL,
+    `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`,
     {
       messaging_product: "whatsapp",
       to,
@@ -203,10 +238,10 @@ async function sendText(to, body) {
     {
       headers: {
         Authorization: `Bearer ${TOKEN}`,
-        "Content-Type": "application/json",
-      },
+        "Content-Type": "application/json"
+      }
     }
   );
 }
 
-app.listen(PORT, () => console.log("Webhook running on port", PORT));
+app.listen(PORT, () => console.log("✅ WhatsApp Bot Running"));

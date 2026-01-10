@@ -6,13 +6,14 @@ app.use(express.json());
 
 const sessions = {};
 
-const WHATSAPP_API = `https://graph.facebook.com/v18.0/${process.env.PHONE_NUMBER_ID}/messages`;
+const WA_URL = `https://graph.facebook.com/v18.0/${process.env.PHONE_NUMBER_ID}/messages`;
 const TOKEN = process.env.WHATSAPP_TOKEN;
+const SHEET_URL = process.env.GOOGLE_SHEET_URL;
 
-/* ------------------ HELPERS ------------------ */
+/* ---------- HELPERS ---------- */
 
-async function sendMessage(payload) {
-  await axios.post(WHATSAPP_API, payload, {
+async function send(payload) {
+  await axios.post(WA_URL, payload, {
     headers: {
       Authorization: `Bearer ${TOKEN}`,
       "Content-Type": "application/json",
@@ -20,20 +21,15 @@ async function sendMessage(payload) {
   });
 }
 
-async function sendText(to, text) {
-  return sendMessage({
-    messaging_product: "whatsapp",
-    to,
-    text: { body: text },
-  });
-}
+const text = (to, body) =>
+  send({ messaging_product: "whatsapp", to, text: { body } });
 
-/* ------------------ MENUS ------------------ */
+/* ---------- MENUS ---------- */
 
-async function sendMainMenu(to) {
+async function mainMenu(to) {
   sessions[to] = { step: "MENU" };
 
-  await sendMessage({
+  await send({
     messaging_product: "whatsapp",
     to,
     type: "interactive",
@@ -41,7 +37,6 @@ async function sendMainMenu(to) {
       type: "list",
       header: { type: "text", text: "🥛 Bala Milk Store" },
       body: { text: "Please choose an option" },
-      footer: { text: "Tap to select" },
       action: {
         button: "Menu",
         sections: [
@@ -54,89 +49,73 @@ async function sendMainMenu(to) {
               { id: "GHEE", title: "Ghee", description: "₹1000 / Kg" },
             ],
           },
-          {
-            title: "Others",
-            rows: [
-              { id: "SUBS", title: "Daily Subscription" },
-              { id: "OWNER", title: "Talk to Owner" },
-            ],
-          },
         ],
       },
     },
   });
 }
 
-async function sendQuantityMenu(to, product) {
+async function quantityMenu(to, product) {
   sessions[to].step = "QTY";
+  sessions[to].product = product;
 
-  const qtyMap = {
+  const map = {
     BUFFALO: [
-      { id: "0.5", title: "500 ml", description: "₹50" },
-      { id: "1", title: "1 Liter", description: "₹100" },
-      { id: "2", title: "2 Liters", description: "₹200" },
+      { id: "500ml|50", title: "500 ml", description: "₹50" },
+      { id: "1L|100", title: "1 Liter", description: "₹100" },
+      { id: "2L|200", title: "2 Liter", description: "₹200" },
     ],
     COW: [
-      { id: "0.5", title: "500 ml", description: "₹60" },
-      { id: "1", title: "1 Liter", description: "₹120" },
+      { id: "500ml|60", title: "500 ml", description: "₹60" },
+      { id: "1L|120", title: "1 Liter", description: "₹120" },
     ],
     PANEER: [
-      { id: "250", title: "250 g", description: "₹150" },
-      { id: "500", title: "500 g", description: "₹300" },
+      { id: "250g|150", title: "250 g", description: "₹150" },
+      { id: "500g|300", title: "500 g", description: "₹300" },
     ],
     GHEE: [
-      { id: "250", title: "250 g", description: "₹250" },
-      { id: "500", title: "500 g", description: "₹500" },
+      { id: "250g|250", title: "250 g", description: "₹250" },
+      { id: "500g|500", title: "500 g", description: "₹500" },
     ],
   };
 
-  await sendMessage({
+  await send({
     messaging_product: "whatsapp",
     to,
     type: "interactive",
     interactive: {
       type: "list",
-      body: { text: `Select quantity for ${product}` },
+      body: { text: "Select quantity" },
       action: {
         button: "Quantity",
         sections: [
-          {
-            title: "Available",
-            rows: qtyMap[product],
-          },
-          {
-            title: "Navigation",
-            rows: [{ id: "BACK_MENU", title: "⬅ Back" }],
-          },
+          { title: "Options", rows: map[product] },
+          { title: "Navigation", rows: [{ id: "BACK_MENU", title: "⬅ Back" }] },
         ],
       },
     },
   });
 }
 
-async function sendAddressMenu(to) {
+async function addressMenu(to) {
   sessions[to].step = "ADDRESS";
 
-  await sendMessage({
+  await send({
     messaging_product: "whatsapp",
     to,
     type: "interactive",
     interactive: {
       type: "list",
-      body: { text: "Select delivery address option" },
+      body: { text: "Choose address option" },
       action: {
         button: "Address",
         sections: [
           {
-            title: "Address Options",
+            title: "Address",
             rows: [
-              { id: "LIVE_LOC", title: "📍 Share Live Location" },
-              { id: "TYPE_ADDR", title: "✍ Type Address" },
+              { id: "LIVE", title: "📍 Share Live Location" },
+              { id: "TYPE", title: "✍ Type Address" },
             ],
-          },
-          {
-            title: "Navigation",
-            rows: [{ id: "BACK_QTY", title: "⬅ Back" }],
           },
         ],
       },
@@ -144,10 +123,10 @@ async function sendAddressMenu(to) {
   });
 }
 
-async function sendTimeMenu(to) {
+async function timeMenu(to) {
   sessions[to].step = "TIME";
 
-  await sendMessage({
+  await send({
     messaging_product: "whatsapp",
     to,
     type: "interactive",
@@ -160,13 +139,9 @@ async function sendTimeMenu(to) {
           {
             title: "Slots",
             rows: [
-              { id: "MORNING", title: "🌅 Morning (6–9 AM)" },
-              { id: "EVENING", title: "🌆 Evening (5–8 PM)" },
+              { id: "Morning", title: "🌅 Morning (6–9 AM)" },
+              { id: "Evening", title: "🌆 Evening (5–8 PM)" },
             ],
-          },
-          {
-            title: "Navigation",
-            rows: [{ id: "BACK_ADDR", title: "⬅ Back" }],
           },
         ],
       },
@@ -174,10 +149,10 @@ async function sendTimeMenu(to) {
   });
 }
 
-async function sendSummary(to) {
+async function summary(to) {
   const s = sessions[to];
 
-  await sendMessage({
+  await send({
     messaging_product: "whatsapp",
     to,
     type: "interactive",
@@ -187,21 +162,19 @@ async function sendSummary(to) {
         text:
           `🧾 *Order Summary*\n\n` +
           `Product: ${s.product}\n` +
-          `Quantity: ${s.qty}\n` +
+          `Qty: ${s.quantity}\n` +
+          `Price: ₹${s.price}\n` +
           `Address: ${s.address}\n` +
           `Time: ${s.time}`,
       },
       action: {
-        buttons: [
-          { type: "reply", reply: { id: "CONFIRM", title: "✅ Confirm" } },
-          { type: "reply", reply: { id: "BACK_TIME", title: "⬅ Back" } },
-        ],
+        buttons: [{ type: "reply", reply: { id: "CONFIRM", title: "✅ Confirm Order" } }],
       },
     },
   });
 }
 
-/* ------------------ WEBHOOK ------------------ */
+/* ---------- WEBHOOK ---------- */
 
 app.post("/webhook", async (req, res) => {
   try {
@@ -209,56 +182,66 @@ app.post("/webhook", async (req, res) => {
     if (!msg) return res.sendStatus(200);
 
     const from = msg.from;
-    const id = msg.interactive?.list_reply?.id || msg.interactive?.button_reply?.id;
+    const replyId =
+      msg.interactive?.list_reply?.id ||
+      msg.interactive?.button_reply?.id;
 
     if (!sessions[from]) {
-      await sendMainMenu(from);
+      await mainMenu(from);
       return res.sendStatus(200);
     }
 
     const s = sessions[from];
 
-    if (s.step === "MENU") {
-      s.product = id;
-      await sendQuantityMenu(from, id);
+    if (s.step === "MENU") return quantityMenu(from, replyId);
+
+    if (s.step === "QTY") {
+      const [q, p] = replyId.split("|");
+      s.quantity = q;
+      s.price = p;
+      return addressMenu(from);
     }
 
-    else if (id === "BACK_MENU") {
-      await sendMainMenu(from);
+    if (s.step === "ADDRESS") {
+      s.address = replyId === "LIVE" ? "Live Location" : "Typed Address";
+      return timeMenu(from);
     }
 
-    else if (s.step === "QTY") {
-      if (id === "BACK_MENU") return sendMainMenu(from);
-      s.qty = id;
-      await sendAddressMenu(from);
+    if (s.step === "TIME") {
+      s.time = replyId;
+      return summary(from);
     }
 
-    else if (s.step === "ADDRESS") {
-      if (id === "BACK_QTY") return sendQuantityMenu(from, s.product);
-      s.address = id === "LIVE_LOC" ? "Live Location" : "Typed Address";
-      await sendTimeMenu(from);
-    }
+    if (replyId === "CONFIRM") {
+      const orderId = "ORD" + Date.now();
 
-    else if (s.step === "TIME") {
-      if (id === "BACK_ADDR") return sendAddressMenu(from);
-      s.time = id;
-      await sendSummary(from);
-    }
+      await axios.post(SHEET_URL, {
+        orderId,
+        phone: from,
+        product: s.product,
+        quantity: s.quantity,
+        price: s.price,
+        address: s.address,
+        deliveryTime: s.time,
+      });
 
-    else if (id === "CONFIRM") {
-      await sendText(from, "✅ Order confirmed! Thank you 🙏");
+      await text(
+        from,
+        `🙏 *Thank you for ordering from Bala Milk Store*\n\nOrder ID: ${orderId}\nWe will contact you shortly.`
+      );
+
       delete sessions[from];
-      await sendMainMenu(from);
+      await mainMenu(from);
     }
 
     res.sendStatus(200);
   } catch (e) {
-    console.error(e.response?.data || e.message);
+    console.error(e.message);
     res.sendStatus(200);
   }
 });
 
-/* ------------------ VERIFY ------------------ */
+/* ---------- VERIFY ---------- */
 
 app.get("/webhook", (req, res) => {
   if (req.query["hub.verify_token"] === process.env.VERIFY_TOKEN) {

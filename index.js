@@ -5,26 +5,24 @@ import bodyParser from "body-parser";
 const app = express();
 app.use(bodyParser.json());
 
-/* ================= CONFIG ================= */
 const TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
-/* ================= SESSION STORE ================= */
 const sessions = {};
 
-/* ================= WEBHOOK VERIFY ================= */
+/* ================= VERIFY ================= */
 app.get("/webhook", (req, res) => {
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-  if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    return res.status(200).send(challenge);
+  if (
+    req.query["hub.mode"] === "subscribe" &&
+    req.query["hub.verify_token"] === VERIFY_TOKEN
+  ) {
+    return res.send(req.query["hub.challenge"]);
   }
   res.sendStatus(403);
 });
 
-/* ================= WEBHOOK RECEIVE ================= */
+/* ================= RECEIVE ================= */
 app.post("/webhook", async (req, res) => {
   try {
     const msg = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
@@ -37,72 +35,66 @@ app.post("/webhook", async (req, res) => {
 
     if (!sessions[from]) {
       sessions[from] = { step: "MENU" };
-      await sendMainMenu(from);
+      await sendMenu(from);
       return res.sendStatus(200);
     }
 
     const s = sessions[from];
 
-    /* ===== LOCATION ===== */
-    if (msg.location && s.step === "LOCATION") {
-      s.location = msg.location;
-      s.step = "DELIVERY_TIME";
-      await sendDeliveryTime(from);
-      return res.sendStatus(200);
-    }
-
     /* ===== BACK ===== */
     if (replyId === "BACK") {
       s.step = "MENU";
-      await sendMainMenu(from);
+      await sendMenu(from);
       return res.sendStatus(200);
     }
 
-    /* ===== FLOW ===== */
+    /* ===== LOCATION ===== */
+    if (msg.location && s.step === "LOCATION") {
+      s.location = msg.location;
+      s.step = "DELIVERY_SLOT";
+      await sendDeliverySlot(from);
+      return res.sendStatus(200);
+    }
+
     switch (s.step) {
       case "MENU":
         selectProduct(replyId, s);
-        if (!s.product) {
-          await sendMainMenu(from);
-          break;
-        }
+        if (!s.product) return sendMenu(from);
         s.step = "QTY";
         await sendQuantity(from, s);
         break;
 
       case "QTY":
         selectQuantity(replyId, s);
-        if (!s.qty) {
-          await sendQuantity(from, s);
-          break;
-        }
+        if (!s.qty) return sendQuantity(from, s);
         s.step = "ADDRESS";
         await sendText(from, "🏠 Please type your delivery address");
         break;
 
       case "ADDRESS":
         s.address = msg.text?.body;
-        if (!s.address) {
-          await sendText(from, "❌ Please type address");
-          break;
-        }
+        if (!s.address) return sendText(from, "❌ Please type address");
         s.step = "LOCATION";
         await sendText(from, "📍 Please share your live location");
         break;
 
-      case "DELIVERY_TIME":
-        s.deliveryTime = replyId;
-        if (!s.deliveryTime) {
-          await sendDeliveryTime(from);
-          break;
-        }
+      case "DELIVERY_SLOT":
+        s.slot = replyId;
+        if (!s.slot) return sendDeliverySlot(from);
+        s.step = "TIME";
+        await sendText(from, `⏰ Enter delivery time for *${s.slot}*`);
+        break;
+
+      case "TIME":
+        s.time = msg.text?.body;
+        if (!s.time) return sendText(from, "❌ Enter valid time");
         s.step = "CONFIRM";
         await sendConfirm(from, s);
         break;
 
       case "CONFIRM":
         if (replyId === "CONFIRM") {
-          await sendText(from, "✅ Order confirmed 🥛");
+          await sendText(from, "✅ Order confirmed 🥛\nThank you!");
           delete sessions[from];
         }
         break;
@@ -115,36 +107,36 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-/* ================= HELPERS ================= */
+/* ================= LOGIC ================= */
 function selectProduct(id, s) {
-  const map = {
-    BUFFALO: ["Buffalo Milk", 100],
-    COW: ["Cow Milk", 120],
-    PANEER: ["Paneer", 600],
-    GHEE: ["Ghee", 1000],
-    SUB: ["Daily Subscription", 0],
-    OWNER: ["Talk to Owner", 0]
+  const p = {
+    BUFFALO: [100, "Buffalo Milk"],
+    COW: [120, "Cow Milk"],
+    PANEER: [600, "Paneer"],
+    GHEE: [1000, "Ghee"],
+    SUB: [0, "Daily Subscription"],
+    OWNER: [0, "Talk to Owner"]
   };
-  if (map[id]) {
-    s.product = map[id][0];
-    s.price = map[id][1];
+  if (p[id]) {
+    s.price = p[id][0];
+    s.product = p[id][1];
   }
 }
 
 function selectQuantity(id, s) {
-  const map = {
+  const q = {
     Q500: ["500 ml", s.price * 0.5],
     Q1: ["1 L", s.price],
     Q2: ["2 L", s.price * 2]
   };
-  if (map[id]) {
-    s.qty = map[id][0];
-    s.total = map[id][1];
+  if (q[id]) {
+    s.qty = q[id][0];
+    s.total = q[id][1];
   }
 }
 
 /* ================= SENDERS ================= */
-async function sendMainMenu(to) {
+async function sendMenu(to) {
   await axios.post(
     `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
     {
@@ -153,9 +145,9 @@ async function sendMainMenu(to) {
       type: "interactive",
       interactive: {
         type: "list",
-        body: { text: "🥛 *Bala Milk Store*\nChoose an option" },
+        body: { text: "🥛 *Bala Milk Store*\nSelect product" },
         action: {
-          button: "View Menu",
+          button: "Menu",
           sections: [
             {
               title: "Products",
@@ -164,7 +156,7 @@ async function sendMainMenu(to) {
                 { id: "COW", title: "Cow Milk – ₹120/L" },
                 { id: "PANEER", title: "Paneer – ₹600/Kg" },
                 { id: "GHEE", title: "Ghee – ₹1000/Kg" },
-                { id: "SUB", title: "Daily Milk Subscription" },
+                { id: "SUB", title: "Daily Subscription" },
                 { id: "OWNER", title: "Talk to Owner" }
               ]
             }
@@ -179,20 +171,20 @@ async function sendMainMenu(to) {
 async function sendQuantity(to, s) {
   await sendButtons(
     to,
-    `🛒 ${s.product}\nChoose quantity\n\n` +
-      `500 ml – ₹${s.price * 0.5}\n1 L – ₹${s.price}\n2 L – ₹${s.price * 2}`,
+    `🛒 ${s.product}\nChoose quantity`,
     [
       { id: "Q500", title: "500 ml" },
       { id: "Q1", title: "1 L" },
-      { id: "Q2", title: "2 L" }
+      { id: "Q2", title: "2 L" },
+      { id: "BACK", title: "⬅ Back" }
     ]
   );
 }
 
-async function sendDeliveryTime(to) {
+async function sendDeliverySlot(to) {
   await sendButtons(
     to,
-    "⏰ Choose delivery time",
+    "⏰ Select delivery slot",
     [
       { id: "Morning", title: "Morning" },
       { id: "Evening", title: "Evening" },
@@ -204,7 +196,13 @@ async function sendDeliveryTime(to) {
 async function sendConfirm(to, s) {
   await sendButtons(
     to,
-    `🧾 Confirm Order\n\n${s.product}\n${s.qty}\n₹${s.total}\n${s.address}`,
+    `🧾 *Confirm Order*\n
+Product: ${s.product}
+Qty: ${s.qty}
+Amount: ₹${s.total}
+Slot: ${s.slot}
+Time: ${s.time}
+Address: ${s.address}`,
     [
       { id: "CONFIRM", title: "Confirm ✅" },
       { id: "BACK", title: "⬅ Back" }
@@ -223,7 +221,7 @@ async function sendButtons(to, body, buttons) {
         type: "button",
         body: { text: body },
         action: {
-          buttons: buttons.map(b => ({
+          buttons: buttons.slice(0, 3).map(b => ({
             type: "reply",
             reply: { id: b.id, title: b.title }
           }))
@@ -234,14 +232,14 @@ async function sendButtons(to, body, buttons) {
   );
 }
 
-async function sendText(to, body) {
+async function sendText(to, text) {
   await axios.post(
     `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
     {
       messaging_product: "whatsapp",
       to,
       type: "text",
-      text: { body }
+      text: { body: text }
     },
     { headers: { Authorization: `Bearer ${TOKEN}` } }
   );

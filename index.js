@@ -4,14 +4,19 @@ import axios from "axios";
 const app = express();
 app.use(express.json());
 
-const sessions = {};
-
-const WA_URL = `https://graph.facebook.com/v18.0/${process.env.PHONE_NUMBER_ID}/messages`;
+/* ================= ENV ================= */
+const PORT = process.env.PORT || 10000;
 const TOKEN = process.env.WHATSAPP_TOKEN;
+const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const SHEET_URL = process.env.GOOGLE_SHEET_URL;
 
-/* ---------- HELPERS ---------- */
+const WA_URL = `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`;
 
+/* ================= SESSION ================= */
+const sessions = {};
+
+/* ================= HELPERS ================= */
 async function send(payload) {
   await axios.post(WA_URL, payload, {
     headers: {
@@ -21,10 +26,10 @@ async function send(payload) {
   });
 }
 
-const text = (to, body) =>
+const textMsg = (to, body) =>
   send({ messaging_product: "whatsapp", to, text: { body } });
 
-/* ---------- MENUS ---------- */
+/* ================= MENUS ================= */
 
 async function mainMenu(to) {
   sessions[to] = { step: "MENU" };
@@ -59,7 +64,7 @@ async function quantityMenu(to, product) {
   sessions[to].step = "QTY";
   sessions[to].product = product;
 
-  const map = {
+  const qtyMap = {
     BUFFALO: [
       { id: "500ml|50", title: "500 ml", description: "₹50" },
       { id: "1L|100", title: "1 Liter", description: "₹100" },
@@ -89,7 +94,7 @@ async function quantityMenu(to, product) {
       action: {
         button: "Quantity",
         sections: [
-          { title: "Options", rows: map[product] },
+          { title: "Options", rows: qtyMap[product] },
           { title: "Navigation", rows: [{ id: "BACK_MENU", title: "⬅ Back" }] },
         ],
       },
@@ -115,6 +120,7 @@ async function addressMenu(to) {
             rows: [
               { id: "LIVE", title: "📍 Share Live Location" },
               { id: "TYPE", title: "✍ Type Address" },
+              { id: "BACK_QTY", title: "⬅ Back" },
             ],
           },
         ],
@@ -141,6 +147,7 @@ async function timeMenu(to) {
             rows: [
               { id: "Morning", title: "🌅 Morning (6–9 AM)" },
               { id: "Evening", title: "🌆 Evening (5–8 PM)" },
+              { id: "BACK_ADDR", title: "⬅ Back" },
             ],
           },
         ],
@@ -149,9 +156,8 @@ async function timeMenu(to) {
   });
 }
 
-async function summary(to) {
+async function orderSummary(to) {
   const s = sessions[to];
-  s.step = "CONFIRM";
 
   await send({
     messaging_product: "whatsapp",
@@ -170,14 +176,15 @@ async function summary(to) {
       },
       action: {
         buttons: [
-          { type: "reply", reply: { id: "CONFIRM", title: "✅ Confirm Order" } }
+          { type: "reply", reply: { id: "CONFIRM", title: "✅ Confirm Order" } },
+          { type: "reply", reply: { id: "BACK_TIME", title: "⬅ Back" } },
         ],
       },
     },
   });
 }
 
-/* ---------- WEBHOOK ---------- */
+/* ================= WEBHOOK ================= */
 
 app.post("/webhook", async (req, res) => {
   try {
@@ -187,17 +194,44 @@ app.post("/webhook", async (req, res) => {
     const from = msg.from;
     const replyId =
       msg.interactive?.list_reply?.id ||
-      msg.interactive?.button_reply?.id;
+      msg.interactive?.button_reply?.id ||
+      msg.text?.body?.toLowerCase();
 
-    if (!sessions[from]) {
+    if (!sessions[from] && ["hi", "menu", "start"].includes(replyId)) {
       await mainMenu(from);
       return res.sendStatus(200);
     }
 
     const s = sessions[from];
+    if (!s) return res.sendStatus(200);
 
-    // ✅ CONFIRM FIRST
-    if (s.step === "CONFIRM" && replyId === "CONFIRM") {
+    /* ---- Navigation ---- */
+    if (replyId === "BACK_MENU") return mainMenu(from);
+    if (replyId === "BACK_QTY") return quantityMenu(from, s.product);
+    if (replyId === "BACK_ADDR") return addressMenu(from);
+    if (replyId === "BACK_TIME") return timeMenu(from);
+
+    /* ---- Flow ---- */
+    if (s.step === "MENU") return quantityMenu(from, replyId);
+
+    if (s.step === "QTY") {
+      const [qty, price] = replyId.split("|");
+      s.quantity = qty;
+      s.price = price;
+      return addressMenu(from);
+    }
+
+    if (s.step === "ADDRESS") {
+      s.address = replyId === "LIVE" ? "Live Location" : "Typed Address";
+      return timeMenu(from);
+    }
+
+    if (s.step === "TIME") {
+      s.time = replyId;
+      return orderSummary(from);
+    }
+
+    if (replyId === "CONFIRM") {
       const orderId = "ORD" + Date.now();
 
       await axios.post(SHEET_URL, {
@@ -210,48 +244,28 @@ app.post("/webhook", async (req, res) => {
         deliveryTime: s.time,
       });
 
-      await text(
+      await textMsg(
         from,
         `🙏 *Thank you for ordering from Bala Milk Store*\n\n🆔 Order ID: ${orderId}\nWe will contact you shortly.`
       );
 
-      delete sessions[from];
-      return res.sendStatus(200);
-    }
-
-    if (s.step === "MENU") return quantityMenu(from, replyId);
-
-    if (s.step === "QTY") {
-      const [q, p] = replyId.split("|");
-      s.quantity = q;
-      s.price = p;
-      return addressMenu(from);
-    }
-
-    if (s.step === "ADDRESS") {
-      s.address = replyId === "LIVE" ? "Live Location" : "Typed Address";
-      return timeMenu(from);
-    }
-
-    if (s.step === "TIME") {
-      s.time = replyId;
-      return summary(from);
+      delete sessions[from]; // ✅ END SESSION
     }
 
     res.sendStatus(200);
-  } catch (e) {
-    console.error(e);
+  } catch (err) {
+    console.error("Webhook error:", err.message);
     res.sendStatus(200);
   }
 });
 
-/* ---------- VERIFY ---------- */
+/* ================= VERIFY ================= */
 
 app.get("/webhook", (req, res) => {
-  if (req.query["hub.verify_token"] === process.env.VERIFY_TOKEN) {
+  if (req.query["hub.verify_token"] === VERIFY_TOKEN) {
     return res.send(req.query["hub.challenge"]);
   }
   res.sendStatus(403);
 });
 
-app.listen(10000, () => console.log("Server running on 10000"));
+app.listen(PORT, () => console.log("Server running on", PORT));

@@ -1,6 +1,6 @@
 import express from "express";
 import axios from "axios";
-const fs = require('fs'); // For persistent sessions
+import * as fs from 'node:fs'; // Use ES module import for fs
 
 const app = express();
 app.use(express.json());
@@ -270,6 +270,8 @@ app.get("/webhook", (req, res) => {
   }
   res.sendStatus(403);
 });
-app.listen(10000, () =>
-  console.log("Server running on port 10000")
+
+const PORT = process.env.PORT || 10000; // Use Render's assigned PORT
+app.listen(PORT, () =>
+  console.log(`Server running on port ${PORT}`)
 );

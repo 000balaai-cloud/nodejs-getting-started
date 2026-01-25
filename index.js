@@ -1,6 +1,6 @@
 import express from "express";
 import axios from "axios";
-import * as fs from 'node:fs'; // Use ES module import for fs
+import * as fs from "node:fs";
 
 const app = express();
 app.use(express.json());
@@ -9,33 +9,26 @@ app.use(express.json());
 const WA_URL = `https://graph.facebook.com/v18.0/${process.env.PHONE_NUMBER_ID}/messages`;
 const TOKEN = process.env.WHATSAPP_TOKEN;
 const SHEET_URL = process.env.GOOGLE_SHEET_URL;
-const SESSION_FILE = '/data/sessions.json'; // Mount path for Render disk (add Disk in Render dashboard)
+const SESSION_FILE = "/data/sessions.json";
+
 const sessions = {};
 
 /* ================= PERSISTENCE ================= */
-// Load sessions from file at startup
 function loadSessions() {
   try {
     if (fs.existsSync(SESSION_FILE)) {
-      const data = fs.readFileSync(SESSION_FILE, 'utf8');
-      Object.assign(sessions, JSON.parse(data));
-      console.log('Sessions loaded from file');
+      Object.assign(sessions, JSON.parse(fs.readFileSync(SESSION_FILE, "utf8")));
+      console.log("Sessions loaded");
     }
-  } catch (err) {
-    console.error('Error loading sessions:', err);
+  } catch (e) {
+    console.error(e);
   }
 }
 
-// Save sessions to file after changes
 function saveSessions() {
-  try {
-    fs.writeFileSync(SESSION_FILE, JSON.stringify(sessions));
-  } catch (err) {
-    console.error('Error saving sessions:', err);
-  }
+  fs.writeFileSync(SESSION_FILE, JSON.stringify(sessions));
 }
 
-// Load at server start
 loadSessions();
 
 /* ================= HELPERS ================= */
@@ -47,6 +40,7 @@ async function send(payload) {
     },
   });
 }
+
 const sendText = (to, body) =>
   send({ messaging_product: "whatsapp", to, text: { body } });
 
@@ -54,6 +48,7 @@ const sendText = (to, body) =>
 async function mainMenu(to) {
   sessions[to] = { step: "MENU" };
   saveSessions();
+
   await send({
     messaging_product: "whatsapp",
     to,
@@ -61,7 +56,7 @@ async function mainMenu(to) {
     interactive: {
       type: "list",
       header: { type: "text", text: "🥛 Bala Milk Store" },
-      body: { text: "Please choose an option" },
+      body: { text: "Please choose a product" },
       action: {
         button: "Menu",
         sections: [
@@ -79,11 +74,13 @@ async function mainMenu(to) {
     },
   });
 }
+
 async function quantityMenu(to, product) {
   const s = sessions[to];
   s.step = "QTY";
   s.product = product;
   saveSessions();
+
   const map = {
     BUFFALO: [
       { id: "500ml|50", title: "500 ml", description: "₹50" },
@@ -102,6 +99,7 @@ async function quantityMenu(to, product) {
       { id: "500g|500", title: "500 g", description: "₹500" },
     ],
   };
+
   await send({
     messaging_product: "whatsapp",
     to,
@@ -111,17 +109,16 @@ async function quantityMenu(to, product) {
       body: { text: "Select quantity" },
       action: {
         button: "Quantity",
-        sections: [
-          { title: "Options", rows: map[product] },
-          { title: "Navigation", rows: [{ id: "BACK_MENU", title: "⬅ Back" }] },
-        ],
+        sections: [{ title: "Options", rows: map[product] }],
       },
     },
   });
 }
+
 async function addressMenu(to) {
-  sessions[to].step = "ADDRESS";
+  sessions[to].step = "ADDRESS_OPTION";
   saveSessions();
+
   await send({
     messaging_product: "whatsapp",
     to,
@@ -144,9 +141,11 @@ async function addressMenu(to) {
     },
   });
 }
+
 async function timeMenu(to) {
   sessions[to].step = "TIME";
   saveSessions();
+
   await send({
     messaging_product: "whatsapp",
     to,
@@ -169,10 +168,12 @@ async function timeMenu(to) {
     },
   });
 }
+
 async function summary(to) {
   const s = sessions[to];
   s.step = "CONFIRMING";
   saveSessions();
+
   await send({
     messaging_product: "whatsapp",
     to,
@@ -196,31 +197,28 @@ async function summary(to) {
     },
   });
 }
+
 /* ================= WEBHOOK ================= */
 app.post("/webhook", async (req, res) => {
   try {
     const msg = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
     if (!msg) return res.sendStatus(200);
+
     const from = msg.from;
     const replyId =
       msg.interactive?.list_reply?.id ||
       msg.interactive?.button_reply?.id;
-    /* 🚫 Ignore all events if order already completed */
-    if (sessions[from]?.step === "COMPLETED") {
-      return res.sendStatus(200);
-    }
-    /* Start menu only on first text */
+
     if (!sessions[from] && msg.type === "text") {
       await mainMenu(from);
       return res.sendStatus(200);
     }
+
     const s = sessions[from];
     if (!s) return res.sendStatus(200);
-    if (replyId === "BACK_MENU") {
-      await mainMenu(from);
-      return res.sendStatus(200);
-    }
+
     if (s.step === "MENU") return quantityMenu(from, replyId);
+
     if (s.step === "QTY") {
       const [q, p] = replyId.split("|");
       s.quantity = q;
@@ -228,19 +226,38 @@ app.post("/webhook", async (req, res) => {
       saveSessions();
       return addressMenu(from);
     }
-    if (s.step === "ADDRESS") {
-      s.address = replyId === "LIVE" ? "Live Location" : "Typed Address";
+
+    /* ADDRESS OPTION */
+    if (s.step === "ADDRESS_OPTION") {
+      if (replyId === "LIVE") {
+        s.address = "Live Location";
+        saveSessions();
+        return timeMenu(from);
+      }
+      if (replyId === "TYPE") {
+        s.step = "ADDRESS_TEXT";
+        saveSessions();
+        return sendText(from, "✍ Please type your full delivery address:");
+      }
+    }
+
+    /* ADDRESS TEXT */
+    if (s.step === "ADDRESS_TEXT" && msg.type === "text") {
+      s.address = msg.text.body;
       saveSessions();
       return timeMenu(from);
     }
+
     if (s.step === "TIME") {
       s.time = replyId;
       saveSessions();
       return summary(from);
     }
+
     if (replyId === "CONFIRM" && s.step === "CONFIRMING") {
-      s.step = "COMPLETED"; // 🔥 CRITICAL FIX
+      s.step = "COMPLETED";
       saveSessions();
+
       const orderId = "ORD" + Date.now();
       await axios.post(SHEET_URL, {
         orderId,
@@ -251,27 +268,26 @@ app.post("/webhook", async (req, res) => {
         address: s.address,
         deliveryTime: s.time,
       });
+
       await sendText(
         from,
-        `🙏 *Thank you for ordering from Bala Milk Store*\n\n🆔 Order ID: ${orderId}\nWe will contact you shortly.`
+        `🙏 Thank you for ordering from Bala Milk Store\n\n🆔 Order ID: ${orderId}`
       );
-      return res.sendStatus(200);
     }
+
     res.sendStatus(200);
-  } catch (err) {
-    console.error(err);
+  } catch (e) {
+    console.error(e);
     res.sendStatus(200);
   }
 });
+
 /* ================= VERIFY ================= */
 app.get("/webhook", (req, res) => {
-  if (req.query["hub.verify_token"] === process.env.VERIFY_TOKEN) {
+  if (req.query["hub.verify_token"] === process.env.VERIFY_TOKEN)
     return res.send(req.query["hub.challenge"]);
-  }
   res.sendStatus(403);
 });
 
-const PORT = process.env.PORT || 10000; // Use Render's assigned PORT
-app.listen(PORT, () =>
-  console.log(`Server running on port ${PORT}`)
-);
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log("Server running on " + PORT));

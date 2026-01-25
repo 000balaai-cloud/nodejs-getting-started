@@ -1,6 +1,5 @@
 import express from "express";
 import axios from "axios";
-import * as fs from "node:fs";
 
 const app = express();
 app.use(express.json());
@@ -9,27 +8,10 @@ app.use(express.json());
 const WA_URL = `https://graph.facebook.com/v18.0/${process.env.PHONE_NUMBER_ID}/messages`;
 const TOKEN = process.env.WHATSAPP_TOKEN;
 const SHEET_URL = process.env.GOOGLE_SHEET_URL;
-const SESSION_FILE = "/data/sessions.json";
 
+/* ================= IN-MEMORY SESSIONS ================= */
+/* ⚠️ Free Render: resets on restart (this is expected) */
 const sessions = {};
-
-/* ================= PERSISTENCE ================= */
-function loadSessions() {
-  try {
-    if (fs.existsSync(SESSION_FILE)) {
-      Object.assign(sessions, JSON.parse(fs.readFileSync(SESSION_FILE, "utf8")));
-      console.log("Sessions loaded");
-    }
-  } catch (e) {
-    console.error(e);
-  }
-}
-
-function saveSessions() {
-  fs.writeFileSync(SESSION_FILE, JSON.stringify(sessions));
-}
-
-loadSessions();
 
 /* ================= HELPERS ================= */
 async function send(payload) {
@@ -47,7 +29,6 @@ const sendText = (to, body) =>
 /* ================= MENUS ================= */
 async function mainMenu(to) {
   sessions[to] = { step: "MENU" };
-  saveSessions();
 
   await send({
     messaging_product: "whatsapp",
@@ -79,7 +60,6 @@ async function quantityMenu(to, product) {
   const s = sessions[to];
   s.step = "QTY";
   s.product = product;
-  saveSessions();
 
   const map = {
     BUFFALO: [
@@ -117,7 +97,6 @@ async function quantityMenu(to, product) {
 
 async function addressMenu(to) {
   sessions[to].step = "ADDRESS_OPTION";
-  saveSessions();
 
   await send({
     messaging_product: "whatsapp",
@@ -144,7 +123,6 @@ async function addressMenu(to) {
 
 async function timeMenu(to) {
   sessions[to].step = "TIME";
-  saveSessions();
 
   await send({
     messaging_product: "whatsapp",
@@ -172,7 +150,6 @@ async function timeMenu(to) {
 async function summary(to) {
   const s = sessions[to];
   s.step = "CONFIRMING";
-  saveSessions();
 
   await send({
     messaging_product: "whatsapp",
@@ -209,6 +186,7 @@ app.post("/webhook", async (req, res) => {
       msg.interactive?.list_reply?.id ||
       msg.interactive?.button_reply?.id;
 
+    /* Start conversation */
     if (!sessions[from] && msg.type === "text") {
       await mainMenu(from);
       return res.sendStatus(200);
@@ -223,40 +201,32 @@ app.post("/webhook", async (req, res) => {
       const [q, p] = replyId.split("|");
       s.quantity = q;
       s.price = p;
-      saveSessions();
       return addressMenu(from);
     }
 
-    /* ADDRESS OPTION */
     if (s.step === "ADDRESS_OPTION") {
       if (replyId === "LIVE") {
         s.address = "Live Location";
-        saveSessions();
         return timeMenu(from);
       }
       if (replyId === "TYPE") {
         s.step = "ADDRESS_TEXT";
-        saveSessions();
         return sendText(from, "✍ Please type your full delivery address:");
       }
     }
 
-    /* ADDRESS TEXT */
     if (s.step === "ADDRESS_TEXT" && msg.type === "text") {
       s.address = msg.text.body;
-      saveSessions();
       return timeMenu(from);
     }
 
     if (s.step === "TIME") {
       s.time = replyId;
-      saveSessions();
       return summary(from);
     }
 
     if (replyId === "CONFIRM" && s.step === "CONFIRMING") {
       s.step = "COMPLETED";
-      saveSessions();
 
       const orderId = "ORD" + Date.now();
       await axios.post(SHEET_URL, {
@@ -271,7 +241,7 @@ app.post("/webhook", async (req, res) => {
 
       await sendText(
         from,
-        `🙏 Thank you for ordering from Bala Milk Store\n\n🆔 Order ID: ${orderId}`
+        `🙏 Thank you for ordering from Bala Milk Store\n🆔 Order ID: ${orderId}`
       );
     }
 
@@ -290,4 +260,4 @@ app.get("/webhook", (req, res) => {
 });
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log("Server running on " + PORT));
+app.listen(PORT, () => console.log("🚀 Server running on " + PORT));
